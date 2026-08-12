@@ -1,0 +1,125 @@
+// Auth service — talks to the `iwm-auth` Lambda via the `authApi` client
+// (see services/api.js). Accounts are created by clients themselves through
+// /signup; admins are pre-provisioned in DynamoDB and cannot self-register.
+import { authApi } from './api';
+
+const TOKEN_KEY = 'ww_token';
+const USER_KEY = 'ww_user';
+
+function persistSession(token, user) {
+  localStorage.setItem(TOKEN_KEY, token);
+  localStorage.setItem(USER_KEY, JSON.stringify(user));
+}
+
+// Credentials: email + password + secretAnswer (the answer to the security
+// question chosen at signup, e.g. "What is your favorite food?").
+// No role is passed — it's whatever the account has in the database. The API
+// still accepts an optional role and will reject a mismatch, but the UI has
+// no reason to guess.
+export async function login({ email, password, secretAnswer }) {
+  const { data } = await authApi.post('/auth/login', {
+    email,
+    password,
+    secretAnswer,
+  });
+  persistSession(data.token, data.user);
+  return data;
+}
+
+// Self-service signup — always creates a 'client' account. Admin accounts are
+// provisioned directly in the database, not through this flow.
+export async function signup({
+  name,
+  email,
+  password,
+  secretQuestion,
+  secretAnswer,
+  organization,
+  city,
+  phone,
+}) {
+  const { data } = await authApi.post('/auth/signup', {
+    name,
+    email,
+    password,
+    secretQuestion,
+    secretAnswer,
+    organization,
+    city,
+    phone,
+    role: 'client',
+  });
+  persistSession(data.token, data.user);
+  return data;
+}
+
+export function logout() {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+}
+
+export function getCurrentUser() {
+  try {
+    const raw = localStorage.getItem(USER_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function getToken() {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+/**
+ * The JWT's payload, or null if it isn't a readable token.
+ *
+ * Base64url, so `-` and `_` have to be mapped back before atob, and the
+ * padding the encoder stripped has to be restored.
+ */
+function decodeToken(token) {
+  try {
+    const payload = String(token).split('.')[1];
+    if (!payload) return null;
+    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
+    return JSON.parse(atob(padded));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the token is past its `exp`.
+ *
+ * A token with no `exp` is treated as live: the server is the real authority,
+ * and locking a user out over a claim that was never issued would be worse
+ * than letting one request 401.
+ *
+ * The 30s skew allows for a slightly fast client clock, so a token that the
+ * API would still accept isn't discarded a moment early.
+ */
+export function isTokenExpired(token = getToken()) {
+  const claims = decodeToken(token);
+  if (!claims || typeof claims.exp !== 'number') return false;
+  return claims.exp * 1000 <= Date.now() - 30_000;
+}
+
+/**
+ * Checked before any guarded route renders.
+ *
+ * This deliberately inspects `exp` rather than only asking whether a token
+ * string exists. Presence alone let an expired session mount the dashboard,
+ * which then fired its requests, collected a 401 and bounced to /login — the
+ * blank-dashboard flash on every return to the app. Failing the check up front
+ * means an expired session goes straight to the login screen.
+ */
+export function isAuthenticated() {
+  const token = getToken();
+  if (!token || !getCurrentUser()) return false;
+  if (isTokenExpired(token)) {
+    logout();          // don't leave a dead token behind to fail again
+    return false;
+  }
+  return true;
+}

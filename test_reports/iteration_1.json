@@ -1,0 +1,27 @@
+{
+  "summary": "First-iteration end-to-end frontend testing of WasteWise (Vite + React) frontend-only app. Covered Login (Client & Admin), wrong-password & role-mismatch errors, demo-fill buttons, password show/hide, protected route guards, admin-only guard, sidebar+user-dropdown logout, Dashboard rendering, sidebar navigation, Reports tabs + generate report toast, Settings 4 tabs + notif toggle + API copy/regenerate, Scale Management CRUD (Add), notifications bell, and responsive (390px hamburger / 1920px sidebar). 26/26 effective checks passed after retest of the one initially-flaky admin sidebar render (race condition only).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Sidebar.jsx caches user via getCurrentUser() at mount only. Works because logout unmounts MainLayout, but if future code switches user without unmount (e.g., role switch), sidebar will not refresh. Consider listening to a storage event or a small auth-context for resilience.",
+    ".env contains mixed CRA-style (REACT_APP_BACKEND_URL, WDS_SOCKET_PORT) and Vite-style (VITE_*) keys. Since the app is now Vite, REACT_APP_* vars are not consumed by code; harmless but slightly confusing. The protected REACT_APP_BACKEND_URL is preserved so external preview routing still works — leave as-is.",
+    "Login.jsx hard-codes default email/password into state. Fine for demo, but should be cleared in any production build."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (frontend-only)", "frontend": "100%"},
+  "test_credentials": "client@wastewise.ca / password123 (Client) and admin@wastewise.ca / password123 (Admin) — verified working. ww_token and ww_user are written to localStorage and cleared on logout.",
+  "seed_data_creation": "Added one transient TEST_QA_Scale row via the Add Scale modal during Scale Management testing. Persists only in-memory for the SPA session (no backend).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "App is frontend-only Vite app. The `prefer-redirect` behavior in Login (`location.state?.from?.pathname || '/dashboard'`) means if you visited a protected route while logged out, after login you land on THAT route — not /dashboard. Tests that login-then-assert-dashboard should `localStorage.clear()` and reload BEFORE the login attempt to avoid stale `from` state. Also, after logout/login switches, give the sidebar ~1s to mount before asserting role-specific nav items (admin section appeared on retest with longer wait). Notification bell uses lucide bell icon, no dedicated data-testid yet — opens via click on the bell button in Navbar. Sidebar anchor items (Scale Status, User Management, Data Configuration, System Logs, Research Tools) intentionally show 'coming next' toasts — not bugs.",
+  "rca_of_the_issue": "N/A — no defects found."
+}

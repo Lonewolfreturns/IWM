@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "main-website",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "../Main-website-main/frontend", "start"],
+      "port": 3000
+    },
+    {
+      "name": "iwm",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "frontend"],
+      "port": 3000,
+      "autoPort": true
+    }
+  ]
+}
