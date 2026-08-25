@@ -37,13 +37,67 @@
 // verbatim: no conversion, no drift, no invented precision. Conversion happens
 // only when the viewer has genuinely asked for a different zone.
 
+/**
+ * The clock the fleet's scales actually run on.
+ *
+ * Readings carry a naive wall clock and no offset, so "12:01" is unplaceable on
+ * a timeline until something says which clock produced it. Most scale records
+ * have no `timeZone` set, which left two bad options: show every stamp verbatim
+ * and never convert, or guess the viewer's zone and shift readings by however
+ * far apart the two happen to be.
+ *
+ * WHY A FIXED OFFSET AND NOT "America/Halifax"
+ *
+ * The devices were set once and do not follow daylight saving. Measured against
+ * a live reading on 2026-08-24: the scale reported 12:01 while the Halifax wall
+ * clock read 13:03 — an hour behind, because Halifax was on ADT (UTC-3) and the
+ * device was still on UTC-4.
+ *
+ * Reading those stamps as `America/Halifax` would apply whatever offset Halifax
+ * happens to be on that day, so it would be correct all winter and an hour out
+ * all summer — the worst kind of bug, since it looks fine half the year.
+ * A fixed UTC-4 is what the hardware genuinely keeps, and is therefore right in
+ * both seasons.
+ *
+ * Note the sign: IANA "Etc/GMT+4" means UTC-4. The POSIX convention inverts it.
+ *
+ * A scale that really does sit elsewhere still overrides this by setting
+ * `timeZone` on its own record — this is the fleet default, not a hard-coding.
+ * If the devices are ever reprogrammed to follow DST, change this to
+ * 'America/Halifax' here and FLEET_TIME_ZONE in the readings Lambda.
+ */
+export const FLEET_TIME_ZONE = 'Etc/GMT+4';
+
+/** Human-readable form of the above, for tooltips and settings copy. */
+export const FLEET_TIME_ZONE_LABEL = 'Atlantic Standard (UTC-4, no daylight saving)';
+
+/**
+ * Zones a scale's clock can be set to.
+ *
+ * Split into two groups on purpose.
+ *
+ * The named zones observe daylight saving, and are right for a device that
+ * follows it — its clock moves twice a year and so does the interpretation.
+ *
+ * The fixed offsets do not, and exist because most of this fleet does not
+ * either: a unit programmed once to UTC-4 stays on UTC-4 through the summer.
+ * There is no named zone that means that. Picking "Atlantic (Halifax)" for such
+ * a device is right all winter and an hour out all summer, which is worse than
+ * being obviously wrong, because nobody notices until the clocks change.
+ */
 export const COMMON_TIME_ZONES = [
-  { value: 'America/St_Johns', label: 'Newfoundland (St. John’s)' },
-  { value: 'America/Halifax', label: 'Atlantic (Halifax)' },
-  { value: 'America/Toronto', label: 'Eastern (Toronto / Guelph)' },
-  { value: 'America/Winnipeg', label: 'Central (Winnipeg)' },
-  { value: 'America/Edmonton', label: 'Mountain (Edmonton / Calgary)' },
-  { value: 'America/Vancouver', label: 'Pacific (Vancouver)' },
+  { value: 'America/St_Johns', label: 'Newfoundland (St. John’s) — follows DST' },
+  { value: 'America/Halifax', label: 'Atlantic (Halifax) — follows DST' },
+  { value: 'America/Toronto', label: 'Eastern (Toronto / Guelph) — follows DST' },
+  { value: 'America/Winnipeg', label: 'Central (Winnipeg) — follows DST' },
+  { value: 'America/Edmonton', label: 'Mountain (Edmonton / Calgary) — follows DST' },
+  { value: 'America/Vancouver', label: 'Pacific (Vancouver) — follows DST' },
+  { value: 'Etc/GMT+3', label: 'Fixed UTC-3 — no DST' },
+  { value: 'Etc/GMT+4', label: 'Fixed UTC-4 (Atlantic standard) — no DST' },
+  { value: 'Etc/GMT+5', label: 'Fixed UTC-5 (Eastern standard) — no DST' },
+  { value: 'Etc/GMT+6', label: 'Fixed UTC-6 (Central standard) — no DST' },
+  { value: 'Etc/GMT+7', label: 'Fixed UTC-7 (Mountain standard) — no DST' },
+  { value: 'Etc/GMT+8', label: 'Fixed UTC-8 (Pacific standard) — no DST' },
   { value: 'UTC', label: 'UTC' },
 ];
 
@@ -260,7 +314,7 @@ export function relativeTime(dateTime, sourceZone, now = Date.now(), assumeZone 
  * fallback is meaningful — it marks the source zone as genuinely unknown, so
  * timestamps render verbatim instead of being converted on a guess.
  */
-export function buildZoneMap(scales, fallback) {
+export function buildZoneMap(scales, fallback = FLEET_TIME_ZONE) {
   const map = {};
   (scales || []).forEach((s) => {
     const id = s.scaleId || s.id;

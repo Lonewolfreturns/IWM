@@ -8,6 +8,7 @@
 
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { buildXLSX } from './xlsx.js';
 
 function triggerDownload(blob, filename) {
   const url = URL.createObjectURL(blob);
@@ -35,6 +36,19 @@ export function downloadCSV(filename, columns, rows) {
     type: 'text/csv;charset=utf-8',
   });
   triggerDownload(blob, filename);
+}
+
+// -----------------------------------------------------------------------------
+// XLSX — a real workbook, one sheet per table.
+//
+// The CSV above can only ever be one flat grid, which is why the summary and
+// the raw readings used to be stacked into the same four columns. A workbook
+// lets each table keep its own shape and its own headers.
+//
+// `sheets` is passed straight through to buildXLSX; see xlsx.js for the shape.
+// -----------------------------------------------------------------------------
+export function downloadXLSX(filename, sheets) {
+  triggerDownload(buildXLSX(sheets), filename);
 }
 
 // -----------------------------------------------------------------------------

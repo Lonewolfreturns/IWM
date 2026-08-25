@@ -110,6 +110,7 @@ from decimal import Decimal, InvalidOperation
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+from zoneinfo import ZoneInfo
 
 READINGS_TABLE = os.environ.get("READINGS_TABLE", "IWM")
 SCALES_TABLE = os.environ.get("SCALES_TABLE", "iwm-scales")
@@ -148,7 +149,63 @@ WARN_KG = float(os.environ.get("WARN_KG", "-10"))
 CRIT_RUN = int(os.environ.get("CRIT_RUN", "10"))
 CRIT_KG = float(os.environ.get("CRIT_KG", "-100"))
 
+# ---------------------------------------------------------------------------
+# Sensor noise floor.
+#
+# A load cell does not read a clean zero. It wanders with temperature, vibration
+# and mains noise, and on this fleet that wander is tens of grams: measured over
+# a real 5000-row export, 53.9% of ALL readings fall within +/-50 g of zero, and
+# 24% sit between -20 g and 0. None of that is food.
+#
+# Any rule that counts readings without a floor is therefore counting sensor
+# jitter. The old drift rule did exactly that - "5 consecutive negative
+# readings" treated a -0.01 kg wobble as evidence of calibration loss.
+#
+# Everything below this magnitude is treated as "no measurable change".
+# Set NOISE_FLOOR_KG per deployment; a scale record may override it per device
+# via a `noiseFloorKg` (or `noiseFloorG`) attribute, since sensors differ.
+# ---------------------------------------------------------------------------
+NOISE_FLOOR_KG = float(os.environ.get("NOISE_FLOOR_KG", "0.05"))   # 50 g
+
+# ---------------------------------------------------------------------------
+# The clock the fleet's scales run on.
+#
+# DateTime is stored as the device's own naive wall clock, so every "now"
+# this module compares against has to be expressed on that same clock or the
+# comparison is meaningless.
+#
+# The devices keep a fixed UTC-4 and do not follow daylight saving. Measured
+# against a live reading on 2026-08-24: the scale reported 12:01 while Halifax
+# read 13:03 — an hour behind, Halifax being on ADT (UTC-3) that day.
+#
+# Hence a fixed offset rather than "America/Halifax": the named zone would apply
+# whatever offset Halifax is on, making it right all winter and an hour out all
+# summer. Note the sign — IANA "Etc/GMT+4" means UTC-4.
+#
+# Keep in step with FLEET_TIME_ZONE in frontend/src/lib/time.js.
+# ---------------------------------------------------------------------------
+FLEET_TIME_ZONE = os.environ.get("FLEET_TIME_ZONE", "Etc/GMT+4")
+
+# Silence. A scale only reports when something is thrown away, so a quiet night
+# is normal and a quiet week is not. Measured against real elapsed time, so a
+# fleet-wide ingestion stop surfaces instead of hiding behind itself.
+SILENT_WARN_HOURS = float(os.environ.get("SILENT_WARN_HOURS", "24"))
+SILENT_CRIT_HOURS = float(os.environ.get("SILENT_CRIT_HOURS", "48"))
+SILENT_OFFLINE_HOURS = float(os.environ.get("SILENT_OFFLINE_HOURS", "168"))  # 7 days
+
+# Consecutive unexplained negatives *beyond the noise floor*. Tuned against the
+# export: at 5 this fires 6 times across 4 scales, at 8 it never fires.
 DRIFT_RUN = int(os.environ.get("DRIFT_RUN", "5"))
+
+# Consecutive readings that all sit inside the noise band: the scale is alive
+# and reporting but nothing is registering. Deliberately high - short runs are
+# just a quiet kitchen. At 30 this flags 5 scales in the export, at 10 it would
+# flag 9 and mean nothing.
+FLATLINE_RUN = int(os.environ.get("FLATLINE_RUN", "30"))
+
+# Device-health events, counted per scale within the window.
+REBOOT_COUNT = int(os.environ.get("REBOOT_COUNT", "5"))
+WIFI_FLAP_COUNT = int(os.environ.get("WIFI_FLAP_COUNT", "20"))
 
 # Message1 values that legitimately explain a big negative — emptying the bin
 # or re-zeroing the scale. Alerting on these would mean a red banner every
@@ -287,6 +344,27 @@ def sort_key(r: dict):
     return r.get("dateTime") or f"{r.get('date','')}T{r.get('time','')}"
 
 
+def reading_datetime(r: dict):
+    """
+    A reading's timestamp as a naive datetime, or None if it cannot be read.
+
+    Naive on purpose: DateTime is written as the device's own wall clock, so
+    there is no zone to attach without resolving the scale's location. Callers
+    that only need an elapsed duration (the silence rules) can live with the
+    few hours of skew that implies; see the fetch_live docstring.
+    """
+    raw = sort_key(r)
+    if not raw:
+        return None
+    text = str(raw).replace("T", " ").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text[:len("2026-01-01 00:00:00")], fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def category_of(reading: dict) -> str:
     """Message2 counts as a category only when it matches a known one."""
     msg = (reading.get("message2") or "").strip()
@@ -342,6 +420,57 @@ def org_uids(org: str):
     except ClientError as err:
         print(f"ERROR org_uids: {err}")
         return []
+
+
+def fleet_now():
+    """
+    The current time on the fleet's own clock, as a naive datetime.
+
+    Naive on purpose: it is compared against DateTime values that are
+    themselves naive device wall clocks, so both sides have to be stripped of
+    zone information for the comparison to line up.
+
+    Falls back to UTC if the zone database is unavailable in the runtime, which
+    only costs the live window its accuracy rather than taking the endpoint out.
+    """
+    try:
+        return datetime.now(ZoneInfo(FLEET_TIME_ZONE)).replace(tzinfo=None)
+    except Exception as err:                      # noqa: BLE001 - never fatal
+        print(f"WARN fleet_now: {FLEET_TIME_ZONE} unavailable ({err}); using UTC")
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def scale_noise_floors():
+    """
+    Per-device noise floor overrides, as {uid: kg}.
+
+    Sensors differ, so one global figure is a default rather than a rule. A
+    scale record may carry `noiseFloorKg` (or `noiseFloorG`, for whoever finds
+    grams more natural). Missing or unparseable values simply fall back to
+    NOISE_FLOOR_KG - a bad attribute must not take the alert engine down.
+    """
+    floors = {}
+    try:
+        result = _scales.scan(
+            ProjectionExpression="scaleId, noiseFloorKg, noiseFloorG",
+        )
+        for item in result.get("Items", []):
+            uid = item.get("scaleId")
+            if not uid:
+                continue
+            if item.get("noiseFloorKg") is not None:
+                value = _to_float(item.get("noiseFloorKg"))
+            elif item.get("noiseFloorG") is not None:
+                value = _to_float(item.get("noiseFloorG")) / 1000.0
+            else:
+                continue
+            # A zero or negative floor would disable the guard entirely, which
+            # is how the noisy behaviour comes back by accident.
+            if value > 0:
+                floors[uid] = value
+    except ClientError as err:
+        print(f"ERROR scale_noise_floors: {err}")
+    return floors
 
 
 def query_window(uid, start_iso, end_iso, limit):
@@ -407,7 +536,10 @@ def query_latest(uid, limit):
 
 def resolve_window(params):
     """Returns (start_iso, end_iso) from ?from/?to/?days, defaulting to last N days."""
-    today = datetime.now(timezone.utc).date()
+    # The fleet's today, not UTC's. Between 20:00 and midnight Atlantic these
+    # are different dates, and a "last 7 days" window anchored to the wrong one
+    # either drops the current evening's readings or reaches a day too far.
+    today = fleet_now().date()
 
     date_from = (params.get("from") or "").strip()[:10]
     date_to = (params.get("to") or "").strip()[:10]
@@ -435,22 +567,24 @@ def fetch_live(claims, params):
     most recent rows, so the panel shows the last known activity rather than
     going blank.
 
-    KNOWN ISSUE — this band is comparing two different things.
+    The band is built on the fleet clock (see FLEET_TIME_ZONE), not on UTC.
 
-    It builds its window from `datetime.now(timezone.utc)` and compares that
-    against the DateTime sort key. That would be correct if DateTime were UTC,
-    but the deployed ingest Lambda stores the device's timestamp verbatim, so
-    DateTime is a naive *device-local* wall clock. The two are offset by
-    whatever the device's zone is — three or four hours for Atlantic Canada —
-    so the ±60s band almost never matches and this function silently falls
-    through to the per-device "latest rows" path on nearly every call.
+    This used to compare `datetime.now(timezone.utc)` against the DateTime sort
+    key. That would be correct if DateTime were UTC, but the deployed ingest
+    Lambda stores the device's stamp verbatim, so DateTime is a naive
+    *device-local* wall clock. The two were offset by the device's whole zone
+    offset — four hours here — so the ±60s band never matched and every call
+    silently fell through to the "latest rows" path. That is why the panel was
+    permanently marked Idle however recently a scale had reported.
 
-    The fallback is why the panel still looks reasonable: it shows last-known
-    activity rather than going blank, and marks those rows isLive=False.
+    Both sides are now on the same clock, so the band matches when it should.
+    The fallback is kept for the case it was meant for: nothing has genuinely
+    landed in the window, in which case last-known rows are shown and marked
+    isLive=False rather than leaving the panel blank.
 
-    Fixing it properly means resolving each UID's zone from the iwm-scales
-    table and comparing against local time per device, since one fleet spans
-    several provinces and there is no single "now" to test against.
+    A scale that sets its own `timeZone` is still a real exception here — the
+    band would be off by the difference. That matters only for a device
+    provisioned outside the fleet's zone, and the fallback covers it.
     """
     is_admin = claims["role"] == "admin"
     try:
@@ -463,7 +597,7 @@ def fetch_live(claims, params):
         if not scoped:
             return [], None
 
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = fleet_now()
         start = (now - timedelta(seconds=seconds)).isoformat(timespec="seconds")
         end = (now + timedelta(seconds=seconds)).isoformat(timespec="seconds")
 
@@ -564,116 +698,289 @@ def fetch_alerts(claims, params):
     The escalation here covers the other case: a window that has plenty of
     data but nothing worth alerting on.
     """
+    # Read once and reuse: the per-device overrides are the same whichever
+    # window the escalation below settles on.
+    floors = scale_noise_floors()
+
     if params.get("from") or params.get("to") or params.get("days"):
         readings, err = fetch_readings(claims, params)
         if err:
             return None, err
-        return compute_alerts(readings), None
+        return compute_alerts(readings, noise_floors=floors), None
 
     for days in ALERT_LOOKBACK_DAYS:
         readings, err = fetch_readings(claims, {**params, "days": str(days)})
         if err:
             return None, err
-        alerts = compute_alerts(readings)
+        alerts = compute_alerts(readings, noise_floors=floors)
         if alerts:
             return alerts, None
 
     return [], None
 
 
-def compute_alerts(readings):
-    """
-    Raises at most one alert per device, at the highest severity found.
+# Message1 / Message2 values that describe the device's own state rather than
+# anything that was thrown away. Counted for health, never treated as waste.
+REBOOT_EVENT = "system reboot"
+WIFI_EVENT = "wifi reconnected"
 
-    Every alert carries the timestamp of the sample that triggered it, so an
-    old alert is visibly old rather than looking like it just happened.
+# Severity ordering, and the order rules are preferred in when one device trips
+# several at the same severity. Silence first: a scale nobody has heard from
+# cannot be assessed on anything else, so leading with its drift reading would
+# be answering a question nobody asked.
+SEVERITY_RANK = {"danger": 0, "warning": 1, "info": 2}
+REASON_RANK = {
+    "offline": 0, "silent": 1, "single-drop": 2, "drift": 3,
+    "reboot-loop": 4, "wifi-flapping": 5, "flatline": 6,
+}
 
-    Samples whose Message1 explains the drop (bin emptied, scale tared) are
-    skipped — those are normal operation, and alerting on them would fire
-    nightly and teach everyone to ignore the alert panel.
+
+def _hours_between(later, earlier):
+    return (later - earlier).total_seconds() / 3600.0
+
+
+def _describe_age(hours):
+    """'46.6' -> '1 day 22 hours'. Alert text should not make people do sums."""
+    hours = max(0.0, hours)
+    if hours < 1:
+        return f"{int(round(hours * 60))} minutes"
+    if hours < 48:
+        whole = int(hours)
+        return f"{whole} hour{'' if whole == 1 else 's'}"
+    days = int(hours // 24)
+    rem = int(hours % 24)
+    out = f"{days} day{'' if days == 1 else 's'}"
+    if rem:
+        out += f" {rem} hour{'' if rem == 1 else 's'}"
+    return out
+
+
+def _summarise_others(entries):
+    """Secondary findings, one per reason, with a count when it recurred."""
+    seen = {}
+    for sev, reason, title, *_ in entries:
+        if reason in seen:
+            seen[reason]["occurrences"] += 1
+        else:
+            seen[reason] = {
+                "reason": reason, "title": title,
+                "severity": sev, "occurrences": 1,
+            }
+    return list(seen.values())
+
+
+def compute_alerts(readings, now=None, noise_floors=None):
     """
+    Raises at most one alert per device - the most serious thing wrong with it -
+    and lists whatever else was found alongside, so nothing is silently dropped.
+
+    Every alert carries four separate fields rather than one terse string:
+
+        title    what happened, in five words
+        detail   the measurement behind it
+        meaning  what it usually indicates, in plain English
+        action   what the person reading it should actually do
+
+    That split exists because "5 consecutive readings below -10 kg" told a
+    reader nothing they could act on: not whether it mattered, not what it
+    implied, not what to do next.
+
+    Rules, all measured against a configurable noise floor (see NOISE_FLOOR_KG):
+
+        offline / silent   nothing heard from the device for N hours
+        single-drop        one large unexplained negative reading
+        drift              a run of unexplained negatives beyond the floor
+        reboot-loop        the device keeps restarting
+        wifi-flapping      the device keeps losing its connection
+        flatline           reporting normally, but nothing registers
+
+    Samples whose Message1 explains a drop (bin emptied, scale tared) are
+    skipped by the weight rules - those are normal operation, and alerting on
+    them would fire nightly and teach everyone to ignore the panel.
+    """
+    if now is None:
+        # Compared against naive device wall clocks, so "now" has to be on the
+        # same clock — otherwise every scale looks four hours staler than it is,
+        # which is enough to push a healthy device over the 24h silence line.
+        now = fleet_now()
+    noise_floors = noise_floors or {}
+
     by_uid = defaultdict(list)
     for r in readings:
         by_uid[r["uid"]].append(r)
 
     alerts = []
     for uid, rows in by_uid.items():
-        rows = sorted(rows, key=sort_key)  # chronological
+        rows = sorted(rows, key=sort_key)          # chronological
+        floor = noise_floors.get(uid, NOISE_FLOOR_KG)
+        found = []   # (severity, reason, title, detail, meaning, action, row, first_row)
 
-        worst = None          # (severity, reason, triggering_row, detail)
-        warn_run = crit_run = drift_run = 0
-        warn_from = crit_from = drift_from = None
+        def raise_(sev, reason, title, detail, meaning, action, row, first_row=None):
+            found.append((sev, reason, title, detail, meaning, action, row, first_row or row))
 
-        def escalate(sev, reason, row, detail, first_row):
-            nonlocal worst
-            if worst is None or (sev == "danger" and worst[0] != "danger"):
-                worst = (sev, reason, row, detail, first_row)
+        latest = rows[-1]
+        newest_at = reading_datetime(latest)
+
+        # --- 1. Silence -------------------------------------------------
+        # The single most common real fault on this fleet, and the one the
+        # engine had no rule for at all.
+        if newest_at:
+            age_h = max(0.0, _hours_between(now, newest_at))
+            age_text = _describe_age(age_h)
+            if age_h >= SILENT_OFFLINE_HOURS:
+                raise_("danger", "offline", f"Scale offline - silent {age_text}",
+                       f"No reading since {latest['date']} {latest['time']}, {age_text} ago.",
+                       "The scale has stopped reporting entirely. Power, network or the "
+                       "device itself, rather than anything to do with the kitchen.",
+                       "Check the scale is powered on and on the network. If it is, the "
+                       "unit likely needs a site visit.", latest)
+            elif age_h >= SILENT_CRIT_HOURS:
+                raise_("danger", "silent", f"No readings for {age_text}",
+                       f"Last reading {latest['date']} {latest['time']}, {age_text} ago.",
+                       "Longer than a normal closure. Either the kitchen is shut or the "
+                       "scale has dropped off the network.",
+                       "Confirm whether the site is open. If it is, check the scale's "
+                       "power and Wi-Fi.", latest)
+            elif age_h >= SILENT_WARN_HOURS:
+                raise_("warning", "silent", f"Quiet for {age_text}",
+                       f"Last reading {latest['date']} {latest['time']}, {age_text} ago.",
+                       "A full day with nothing thrown away. Normal over a weekend or a "
+                       "closure; worth a look on a trading day.",
+                       "No action needed if the kitchen was closed. Otherwise check the "
+                       "scale is switched on.", latest)
+
+        # --- 2. Per-reading rules ---------------------------------------
+        drift_run, drift_from, drift_kg = 0, None, 0.0
+        flat_run, flat_from = 0, None
+        reboots, wifi_flaps = 0, 0
+        worst_drop = None
 
         for row in rows:
             kg = row["perDepositWeight"]
-            explained = (row.get("message1") or "").strip().lower() in EXPLAINED_EVENTS
+            msg1 = (row.get("message1") or "").strip().lower()
+            msg2 = (row.get("message2") or "").strip().lower()
+            explained = msg1 in EXPLAINED_EVENTS
 
-            # 1. Single unexplained drop.
-            if not explained:
-                if kg <= CRIT_SINGLE_KG:
-                    escalate("danger", "single-drop", row,
-                             f"Unexplained drop of {kg:.2f} kg in one reading", row)
-                elif kg <= WARN_SINGLE_KG:
-                    escalate("warning", "single-drop", row,
-                             f"Unexplained drop of {kg:.2f} kg in one reading", row)
+            if msg1 == REBOOT_EVENT:
+                reboots += 1
+            if REBOOT_EVENT in msg2:
+                reboots += 1
+            if WIFI_EVENT in msg1 or WIFI_EVENT in msg2:
+                wifi_flaps += 1
 
-            # 2. Sustained run inside a magnitude band.
-            if kg <= CRIT_KG and not explained:
-                crit_from = crit_from or row
-                crit_run += 1
-            else:
-                crit_run, crit_from = 0, None
+            # 2a. One big unexplained negative.
+            if not explained and kg <= WARN_SINGLE_KG:
+                if worst_drop is None or kg < worst_drop["perDepositWeight"]:
+                    worst_drop = row
 
-            if kg <= WARN_KG and not explained:
-                warn_from = warn_from or row
-                warn_run += 1
-            else:
-                warn_run, warn_from = 0, None
-
-            # 3. Drift: many consecutive negatives, whatever their size.
-            if kg < 0:
+            # 2b. Drift: consecutive unexplained negatives past the floor.
+            #     The floor is the whole point - without it this counted a
+            #     10 g wobble as evidence of calibration loss.
+            if kg < -floor and not explained:
                 drift_from = drift_from or row
                 drift_run += 1
+                drift_kg += kg
             else:
-                drift_run, drift_from = 0, None
+                drift_run, drift_from, drift_kg = 0, None, 0.0
 
-            if crit_run >= CRIT_RUN:
-                escalate("danger", "sustained-run", row,
-                         f"{crit_run} consecutive readings below {CRIT_KG:g} kg", crit_from)
-            elif warn_run >= WARN_RUN:
-                escalate("warning", "sustained-run", row,
-                         f"{warn_run} consecutive readings below {WARN_KG:g} kg", warn_from)
-            elif drift_run >= DRIFT_RUN:
-                escalate("warning", "drift", row,
-                         f"{drift_run} consecutive negative readings - possible calibration drift",
-                         drift_from)
+            # 2c. Flatline: alive, reporting, but nothing measurable lands.
+            if abs(kg) <= floor:
+                flat_from = flat_from or row
+                flat_run += 1
+            else:
+                flat_run, flat_from = 0, None
 
-        if not worst:
+            if drift_run >= DRIFT_RUN:
+                raise_("warning", "drift",
+                       "Weight drifting below zero",
+                       f"{drift_run} readings in a row came in negative by more than "
+                       f"{floor * 1000:.0f} g, totalling {drift_kg:.2f} kg, "
+                       f"starting {drift_from['date']} {drift_from['time']}.",
+                       "Readings this far below zero, repeatedly, usually mean the scale "
+                       f"has lost its zero point. Anything within {floor * 1000:.0f} g is "
+                       "normal sensor noise and is already ignored.",
+                       "Clear the platform and re-tare the scale. If it drifts again "
+                       "within a day, the load cell needs checking.",
+                       row, drift_from)
+                drift_run, drift_from, drift_kg = 0, None, 0.0
+
+            if flat_run >= FLATLINE_RUN:
+                raise_("info", "flatline",
+                       "Reporting, but nothing registering",
+                       f"{flat_run} consecutive readings within {floor * 1000:.0f} g of "
+                       f"zero, from {flat_from['date']} {flat_from['time']}.",
+                       "The scale is online and sending data, but no weight is landing on "
+                       "it. Usually a genuinely quiet period; occasionally a sensor that "
+                       "has stopped responding to load.",
+                       "Compare against the kitchen's opening hours. If it was trading, "
+                       "put a known weight on the scale and check it registers.",
+                       row, flat_from)
+                flat_run, flat_from = 0, None
+
+        if worst_drop is not None:
+            kg = worst_drop["perDepositWeight"]
+            sev = "danger" if kg <= CRIT_SINGLE_KG else "warning"
+            raise_(sev, "single-drop", f"Unexplained drop of {abs(kg):.2f} kg",
+                   f"A single reading of {kg:.2f} kg on {worst_drop['date']} "
+                   f"{worst_drop['time']}, with no bin-dump or tare recorded against it.",
+                   "Weight left the scale without the device logging why. Either the bin "
+                   "was emptied without the event being recorded, or the sensor glitched.",
+                   "Check whether the bin was emptied at that time. If not, the reading is "
+                   "suspect and should be excluded before reporting on this period.",
+                   worst_drop)
+
+        if reboots >= REBOOT_COUNT:
+            raise_("warning", "reboot-loop", f"Scale restarted {reboots} times",
+                   f"{reboots} 'System Reboot' events from this scale in the window.",
+                   "Repeated restarts point at an unstable power supply or a failing "
+                   "unit. Readings around each restart may be unreliable.",
+                   "Check the power supply and cabling. Persistent restarts warrant "
+                   "swapping the unit.", latest)
+
+        if wifi_flaps >= WIFI_FLAP_COUNT:
+            raise_("warning", "wifi-flapping", f"Connection dropped {wifi_flaps} times",
+                   f"{wifi_flaps} 'Wifi Reconnected' events from this scale in the window.",
+                   "The scale keeps losing its network connection. Readings still queue "
+                   "locally, but they arrive late and may appear out of order.",
+                   "Check Wi-Fi coverage where the scale sits. A repeater or moving the "
+                   "unit usually fixes it.", latest)
+
+        if not found:
             continue
 
-        severity, reason, row, detail, first_row = worst
+        found.sort(key=lambda f: (SEVERITY_RANK.get(f[0], 9), REASON_RANK.get(f[1], 9)))
+        sev, reason, title, detail, meaning, action, row, first_row = found[0]
+
         alerts.append({
             "id": f"alert-{uid}-{reason}",
             "uid": uid,
             "scale": uid,
             "timestamp": f"{row['date']} {row['time']}".strip(),
-            "since": f"{(first_row or row)['date']} {(first_row or row)['time']}".strip(),
-            "type": detail,
+            "since": f"{first_row['date']} {first_row['time']}".strip(),
+            # `type` stays the headline so any existing consumer keeps working;
+            # the richer fields sit alongside it.
+            "type": title,
+            "title": title,
+            "detail": detail,
+            "meaning": meaning,
+            "action": action,
             "reason": reason,
-            "severity": severity,
+            "severity": sev,
             "status": "Open",
+            "noiseFloorKg": round(floor, 4),
             "triggerKg": round(row["perDepositWeight"], 2),
             "lowestKg": round(min(r["perDepositWeight"] for r in rows), 2),
+            "readingsInWindow": len(rows),
+            # Everything else wrong with this device, so one-alert-per-scale
+            # hides nothing. Collapsed to one entry per reason: a run rule trips
+            # every time the run re-forms, and eight identical lines reading
+            # "Reporting, but nothing registering" is noise, not detail.
+            "alsoFlagged": _summarise_others(found[1:]),
         })
 
-    order = {"danger": 0, "warning": 1}
-    alerts.sort(key=lambda a: (order.get(a["severity"], 9), a["timestamp"]), reverse=False)
-    alerts.sort(key=lambda a: order.get(a["severity"], 9))
+    alerts.sort(key=lambda a: (SEVERITY_RANK.get(a["severity"], 9),
+                               REASON_RANK.get(a["reason"], 9),
+                               a["scale"]))
     return alerts
 
 
@@ -703,9 +1010,22 @@ def _totals_by_day(readings):
 
 
 def dashboard_stats(readings, claims):
+    """
+    Summary tiles for the dashboard.
+
+    `thisWeekTotal` / `lastWeekTotal` are the honest pair. The older
+    `weeklyChangePct` is kept for any client still reading it, but it should
+    not be rendered: a percentage needs a trustworthy denominator, and last
+    week's total is 0 whenever the caller's window is only seven days wide —
+    or, worse, filled with whatever stray rows the "no data in window" fallback
+    returned, which is how a 760% "increase" got on screen. `lastWeekTotal` is
+    returned as None when the window did not actually reach back far enough to
+    measure it, so the client can omit the comparison instead of inventing one.
+    """
     if not readings:
         return {
             "totalWasteToday": 0, "totalWasteYesterday": 0, "weeklyChangePct": 0,
+            "thisWeekTotal": 0, "lastWeekTotal": None,
             "activeScales": 0, "totalScales": 0, "sparkline": [],
         }
 
@@ -718,6 +1038,13 @@ def dashboard_stats(readings, claims):
     last_week = sum(by_day.get(latest - timedelta(days=i), 0.0) for i in range(7, 14))
     change = round(((this_week - last_week) / last_week) * 100) if last_week else 0
 
+    # Distinguish "last week really was zero" from "the window never reached
+    # last week". Both look like 0.0 in `by_day`, and only the first is a fact
+    # worth putting on a tile.
+    oldest = min((parse_date(r["date"]) for r in readings if parse_date(r["date"])),
+                 default=latest)
+    covers_last_week = oldest <= latest - timedelta(days=13)
+
     uids = {r["uid"] for r in readings}
     cutoff = latest - timedelta(days=1)
     active = {r["uid"] for r in readings if (parse_date(r["date"]) or latest) >= cutoff}
@@ -729,7 +1056,9 @@ def dashboard_stats(readings, claims):
     return {
         "totalWasteToday": round(by_day.get(latest, 0.0), 1),
         "totalWasteYesterday": round(by_day.get(latest - timedelta(days=1), 0.0), 1),
-        "weeklyChangePct": change,
+        "weeklyChangePct": change,   # deprecated: see the docstring
+        "thisWeekTotal": round(this_week, 1),
+        "lastWeekTotal": round(last_week, 1) if covers_last_week else None,
         "activeScales": len(active),
         "totalScales": total_scales,
         "sparkline": [
@@ -809,6 +1138,15 @@ def lambda_handler(event, context):
         if re.search(r"/readings/live/?$", path):
             live, err = fetch_live(claims, params)
             return err or respond(200, live)
+
+        # The stats tile compares this week against last week, so it needs
+        # fourteen days in hand — the shared default window is seven, which is
+        # why the comparison had nothing to stand on. Only widened when the
+        # caller did not ask for a window of their own.
+        if re.search(r"/dashboard/stats/?$", path) and not any(
+            params.get(k) for k in ("from", "to", "days")
+        ):
+            params = {**params, "days": 14}
 
         readings, err = fetch_readings(claims, params)
         if err:

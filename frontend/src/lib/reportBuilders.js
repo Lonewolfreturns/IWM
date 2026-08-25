@@ -69,7 +69,7 @@ export function coverageSections(cov) {
   return out;
 }
 
-function summarySections(total) {
+export function summarySections(total) {
   if (!total) return [];
   return [
     { type: 'heading', text: 'At a Glance' },
@@ -98,7 +98,7 @@ function summarySections(total) {
  * producing large negatives is worth investigating even though the figure
  * does not belong in a deposit column.
  */
-function scaleSections(scaleRows) {
+export function scaleSections(scaleRows) {
   if (!scaleRows?.length) return [];
 
   const reporting = scaleRows.filter((s) => s.reportedInRange);
@@ -171,7 +171,7 @@ function nameList(rows, cap = 6) {
   return `${names.slice(0, cap).join(', ')} and ${names.length - cap} more.`;
 }
 
-function categorySections(category) {
+export function categorySections(category) {
   if (!category?.length) return [];
   return [
     { type: 'heading', text: 'What Is Being Wasted' },
@@ -191,7 +191,7 @@ function categorySections(category) {
   ];
 }
 
-function mealSections(meals) {
+export function mealSections(meals) {
   if (!meals?.rows?.length) return [];
   return [
     { type: 'heading', text: 'When It Is Being Wasted' },
@@ -221,10 +221,35 @@ function mealSections(meals) {
   ];
 }
 
-function dailySections(daily, { chart = true } = {}) {
+export // Beyond this many days, the day-by-day chart becomes weekly buckets. Reuses
+// the calendar-week grouping the monthly report already defines, rather than
+// chopping blindly every 7 rows — a range starting mid-week should produce a
+// short opening week, not weeks offset from the calendar for its whole length.
+const DAILY_CHART_MAX_BARS = 31;
+
+export function dailySections(daily, { chart = true } = {}) {
   if (!daily?.length) return [];
-  const out = [{ type: 'heading', text: 'Day by Day' }];
-  if (chart) {
+  const bucketed = daily.length > DAILY_CHART_MAX_BARS;
+  const out = [{ type: 'heading', text: bucketed ? 'Week by Week' : 'Day by Day' }];
+  if (chart && bucketed) {
+    out.push({
+      type: 'paragraph',
+      text: `Grouped into weeks — ${daily.length} separate days will not fit on one axis. Every individual day is listed in the table below.`,
+    });
+    out.push({
+      type: 'barchart',
+      unit: 'kg',
+      height: 150,
+      data: weeklyBuckets(daily).map((b) => ({
+        label: b.label,
+        sublabel: b.from.slice(5),
+        value: b.value,
+        // Grey where the week reported nothing, matching the daily chart's
+        // distinction between "quiet" and "no data".
+        color: b.days ? '#22C55E' : '#CBD5E1',
+      })),
+    });
+  } else if (chart) {
     out.push({
       type: 'barchart',
       unit: 'kg',

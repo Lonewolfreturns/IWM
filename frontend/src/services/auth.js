@@ -2,6 +2,7 @@
 // (see services/api.js). Accounts are created by clients themselves through
 // /signup; admins are pre-provisioned in DynamoDB and cannot self-register.
 import { authApi } from './api';
+import { clearDashboardCache } from '../lib/dashboardCache.js';
 
 const TOKEN_KEY = 'ww_token';
 const USER_KEY = 'ww_user';
@@ -56,6 +57,10 @@ export async function signup({
 export function logout() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USER_KEY);
+  // The dashboard keeps its last response in memory so navigation is instant.
+  // Clearing it here covers every exit — the buttons, and the expired-token
+  // path below — so a new sign-in never paints the previous account's scales.
+  clearDashboardCache();
 }
 
 export function getCurrentUser() {

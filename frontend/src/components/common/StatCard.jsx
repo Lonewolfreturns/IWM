@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { TrendingDown, TrendingUp } from 'lucide-react';
+import { Minus, TrendingDown, TrendingUp } from 'lucide-react';
 
 /**
  * Animated count-up hook (no external deps).
@@ -56,12 +56,14 @@ export default function StatCard({
   title,
   value,
   suffix = '',
+  hint,             // one-line plain-English gloss of what `value` counts
   change,
   changeType = 'down', // 'up' | 'down' | 'neutral'
   changeLabel,
   icon: Icon,
   color = 'sky',
   format = 'int',
+  onClick,          // when set, the whole card becomes a button
   children, // optional inline node (e.g., sparkline)
   testId,
 }) {
@@ -73,7 +75,7 @@ export default function StatCard({
       ? TrendingUp
       : changeType === 'down'
       ? TrendingDown
-      : TrendingDown;
+      : Minus;
 
   const trendColor =
     changeType === 'up'
@@ -82,13 +84,34 @@ export default function StatCard({
       ? 'text-leaf bg-leaf/15'
       : 'text-slate-300 bg-ink-700/60';
 
+  // A clickable card has to answer to the keyboard too, so it takes real
+  // button semantics rather than just a cursor and a mousedown handler.
+  const interactive = typeof onClick === 'function';
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-      className="relative overflow-hidden rounded-2xl glass p-5 hover:border-sky/40 hover:shadow-glow transition-all duration-300 group"
+      className={`relative overflow-hidden rounded-2xl glass p-5 hover:border-sky/40 hover:shadow-glow transition-all duration-300 group ${
+        interactive
+          ? 'cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-sky/70'
+          : ''
+      }`}
       data-testid={testId}
+      {...(interactive
+        ? {
+            role: 'button',
+            tabIndex: 0,
+            onClick,
+            onKeyDown: (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onClick(e);
+              }
+            },
+          }
+        : {})}
     >
       {/* Top accent border */}
       <div
@@ -108,6 +131,10 @@ export default function StatCard({
               </span>
             )}
           </div>
+
+          {hint && (
+            <p className="mt-1.5 text-xs text-slate-400 leading-snug">{hint}</p>
+          )}
 
           {change != null && (
             <div className="mt-3 flex items-center gap-2">

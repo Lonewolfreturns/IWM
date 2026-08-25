@@ -37,6 +37,7 @@
     "cmdk": "^1.1.1",
     "date-fns": "^3.6.0",
     "embla-carousel-react": "^8.6.0",
+    "fflate": "^0.8.3",
     "input-otp": "^1.4.2",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.8",
@@ -59,7 +60,8 @@
     "start": "vite --host 0.0.0.0 --port 3000",
     "dev": "vite --host 0.0.0.0 --port 3000",
     "build": "vite build",
-    "preview": "vite preview --host 0.0.0.0 --port 3000"
+    "preview": "vite preview --host 0.0.0.0 --port 3000",
+    "dev:https": "node scripts/dev-https.mjs"
   },
   "browserslist": {
     "production": [
@@ -77,6 +79,7 @@
     "@babel/plugin-proposal-private-property-in-object": "^7.21.11",
     "@eslint/js": "9.23.0",
     "@tanstack/react-query": "^5.100.14",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
     "@vitejs/plugin-react": "^6.0.2",
     "autoprefixer": "^10.4.20",
     "eslint": "9.23.0",

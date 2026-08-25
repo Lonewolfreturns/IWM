@@ -8,7 +8,7 @@ import { getScales, addScale, updateScale, deleteScale } from '../services/scale
 import { getUsers } from '../services/users';
 import StatCard from '../components/common/StatCard.jsx';
 import SelectMenu from '../components/common/SelectMenu.jsx';
-import { COMMON_TIME_ZONES } from '../lib/time.js';
+import { COMMON_TIME_ZONES, FLEET_TIME_ZONE_LABEL } from '../lib/time.js';
 
 function StatusBadge({ status }) {
   if (status === 'online') return <Badge label="Online" variant="success" dot />;
@@ -412,19 +412,26 @@ export default function ScaleManagement() {
           </div>
           <div>
             <label className="block text-[11px] uppercase tracking-wider text-slate-400 mb-1.5">
-              Time Zone
+              Device Clock
             </label>
             <SelectMenu
               value={form.timeZone}
               onChange={(v) => setForm({ ...form, timeZone: v })}
               options={[
-                { value: '', label: "Use viewer's local time" },
+                { value: '', label: `Not set — assume fleet default (${FLEET_TIME_ZONE_LABEL})` },
                 ...COMMON_TIME_ZONES.map((z) => ({ value: z.value, label: z.label })),
               ]}
               testId="scale-timezone-input"
             />
+            {/* This field used to read "readings are displayed in this zone",
+                which is the model backwards and led to it being set to wherever
+                the kitchen is. It describes the clock the hardware keeps: that
+                is what turns a bare "12:01" into a real instant. Where it is
+                displayed is the viewer's own preference, set in Settings. */}
             <p className="text-[11px] text-slate-500 mt-1.5">
-              Readings from this scale are displayed in this zone.
+              The clock this unit's hardware keeps — not where the kitchen is.
+              Readings arrive with no offset, so this is what places them on a
+              timeline. They are then shown in whichever zone you prefer.
             </p>
           </div>
           <div className="sm:col-span-2">
