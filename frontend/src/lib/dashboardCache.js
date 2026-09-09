@@ -23,10 +23,6 @@ const EMPTY = {
   live: [],
   stats: null,
   alerts: [],
-  // Newest DateTime already loaded — the cursor for incremental refreshes.
-  // Cached alongside the rows so a remount resumes the incremental fetch
-  // instead of re-pulling the whole week.
-  newestSeen: null,
   lastUpdated: null,
   // False until a first response has landed, so the component can tell
   // "nothing loaded yet" from "loaded, and genuinely empty".

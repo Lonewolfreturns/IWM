@@ -26,6 +26,10 @@ export default function DataTable({
   searchableKeys = [],
   pageSize = 10,
   emptyLabel = 'No records found.',
+  // Extra filter controls, rendered beside the search box. Kept as a slot so
+  // this component stays generic — it knows nothing about what is being
+  // filtered, only that the caller has already narrowed `data`.
+  toolbar = null,
   testId,
 }) {
   const [query, setQuery] = useState('');
@@ -73,20 +77,25 @@ export default function DataTable({
 
   return (
     <div className="flex flex-col gap-3" data-testid={testId}>
-      {searchableKeys.length > 0 && (
-        <div className="flex items-center gap-2 w-full sm:max-w-sm h-11 rounded-xl bg-ink-800/60 border border-ink-600 px-3 focus-within:border-sky/60 transition-all">
-          <Search className="w-4 h-4 text-slate-400" />
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              setPage(1);
-            }}
-            placeholder="Search..."
-            className="flex-1 bg-transparent outline-none text-sm placeholder:text-slate-500 text-slate-100"
-            data-testid="datatable-search"
-          />
+      {(searchableKeys.length > 0 || toolbar) && (
+        <div className="flex flex-col lg:flex-row lg:items-center gap-3">
+          {searchableKeys.length > 0 && (
+            <div className="flex items-center gap-2 w-full lg:max-w-xs h-11 rounded-xl bg-ink-800/60 border border-ink-600 px-3 focus-within:border-sky/60 transition-all">
+              <Search className="w-4 h-4 text-slate-400" />
+              <input
+                type="search"
+                value={query}
+                onChange={(e) => {
+                  setQuery(e.target.value);
+                  setPage(1);
+                }}
+                placeholder="Search..."
+                className="flex-1 bg-transparent outline-none text-sm placeholder:text-slate-500 text-slate-100"
+                data-testid="datatable-search"
+              />
+            </div>
+          )}
+          {toolbar}
         </div>
       )}
 

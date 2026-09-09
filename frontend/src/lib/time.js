@@ -318,7 +318,15 @@ export function buildZoneMap(scales, fallback = FLEET_TIME_ZONE) {
   const map = {};
   (scales || []).forEach((s) => {
     const id = s.scaleId || s.id;
-    if (id) map[id] = s.timeZone || fallback;
+    if (!id) return;
+    const zone = s.timeZone || fallback;
+    // Registered under both the stored spelling and a lower-cased key, because
+    // callers look this up by the UID on a *reading* — which comes from a
+    // different table and need not match the scale record's capitalisation.
+    // Without this a scale whose record is upper-cased loses its configured
+    // zone and silently falls back to the fleet default.
+    map[id] = zone;
+    map[String(id).trim().toLowerCase()] = zone;
   });
   return map;
 }

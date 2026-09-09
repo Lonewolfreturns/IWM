@@ -1,10 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { AreaChart, Area, ResponsiveContainer } from 'recharts';
 import {
-  AreaChart, Area,
-  CartesianGrid, XAxis, YAxis, Tooltip, ResponsiveContainer,
-} from 'recharts';
-import {
-  Trash2, CalendarDays, Activity, MapPin, AlertTriangle, Radio, Inbox, ArrowDown,
+  Trash2, CalendarDays, Activity, MapPin, AlertTriangle, Radio, ArrowDown,
   ChevronDown, WifiOff, PowerOff, TrendingDown, Gauge, HelpCircle,
 } from 'lucide-react';
 import StatCard from '../components/common/StatCard.jsx';
@@ -13,7 +10,7 @@ import Badge from '../components/common/Badge.jsx';
 import ReadingsTable from '../components/common/ReadingsTable.jsx';
 import EmptyState from '../components/common/EmptyState.jsx';
 import { getScales } from '../services/scales';
-import { getReadings, getReadingsSince, getLiveReadings } from '../services/readings';
+import { getReadings, getLiveReadings } from '../services/readings';
 import { getDashboardStats, getRecentAlerts } from '../services/dashboard';
 import {
   buildZoneMap, formatTime, timeZoneAbbr, relativeTime, readingInstant,
@@ -21,137 +18,137 @@ import {
 } from '../lib/time.js';
 import { useTimeZonePreference } from '../lib/timeZonePreference.jsx';
 import { readDashboardCache, writeDashboardCache } from '../lib/dashboardCache.js';
+import {
+  deriveScaleStatuses, latestByUid, ONLINE_WINDOW_MS, IDLE_WINDOW_MS,
+} from '../lib/scaleStatus.js';
 
 // How often the live ticker re-queries the ±60s window.
 const LIVE_POLL_MS = 15000;
 // How often the rest of the dashboard re-queries (stats, alerts, readings, scales).
-const REFRESH_MS = 60000;
+const REFRESH_MS = 15000;
+
+// How far back a refresh re-reads the readings table.
+//
+// Refreshes used to ask "everything newer than the newest row I already hold",
+// which is only sound if every device shares a clock. DateTime is each device's
+// own naive wall clock, so one global cursor set by the scale running furthest
+// ahead silently excluded every scale behind it: a device an hour back went
+// unseen for an hour, and one in another province for most of a day.
+//
+// A fixed window has no such coupling. Two days comfortably exceeds any
+// plausible clock spread, the merge below already de-duplicates the overlap,
+// and it costs a bounded read rather than a growing one.
+const REFRESH_LOOKBACK_DAYS = 2;
 // Cap on rows held in the table, so a long-running session doesn't grow forever.
 const MAX_TABLE_ROWS = 2000;
-// Readings are event-driven — a scale only reports when something is thrown
-// away — so silence isn't automatically a fault. A kitchen can legitimately go
-// overnight without a deposit. These tiers separate "quiet" from "worrying"
-// instead of calling anything past an hour dead.
-const HOUR_MS = 60 * 60 * 1000;
-const ONLINE_WINDOW_MS = 24 * HOUR_MS;   // reported today
-const IDLE_WINDOW_MS = 7 * 24 * HOUR_MS; // quiet, but plausibly just unused
-
-function ChartTooltip({ active, payload, label, valueSuffix = ' kg' }) {
-  if (!active || !payload?.length) return null;
-  return (
-    <div className="rounded-xl border border-ink-600 bg-ink-900/95 backdrop-blur-md px-3 py-2 shadow-2xl">
-      {label && (
-        <div className="text-[11px] uppercase tracking-wider text-slate-400 mb-1">{label}</div>
-      )}
-      <div className="flex flex-col gap-0.5">
-        {payload.map((p) => (
-          <div key={p.dataKey} className="flex items-center gap-2 text-xs">
-            <span className="inline-block w-2 h-2 rounded-full" style={{ background: p.color }} />
-            <span className="text-slate-300 capitalize">{p.name}:</span>
-            <span className="text-white font-semibold">{p.value}{valueSuffix}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 /* --------------------------- Live activity --------------------------- */
 
+// Deposits are bucketed into 2-hour slots across the window, so each scale
+// carries a small strip showing WHEN it was busy rather than only how much.
+const STRIP_BUCKETS = 12;
+const BUCKET_MS = ONLINE_WINDOW_MS / STRIP_BUCKETS;
+
+// How recently a scale reported, as a colour. Silence is not a fault — a scale
+// only reports when something is thrown away — so the quiet end is muted grey
+// rather than red, which reads as broken.
+function freshness(ageMs) {
+  if (ageMs <= 60 * 60 * 1000) return { dot: 'bg-leaf shadow-[0_0_8px_#22C55E]', text: 'text-leaf' };
+  if (ageMs <= 6 * 60 * 60 * 1000) return { dot: 'bg-sky', text: 'text-sky' };
+  return { dot: 'bg-slate-500', text: 'text-slate-400' };
+}
+
 /**
- * RunningTotalWeight is per-scale state that resets on tare, so plotting it as
- * a single time series across several scales produces a line that jumps
- * between unrelated values — meaningless, and misleading rather than merely
- * ambiguous. So the panel adapts to how many scales are actually in scope:
+ * Scales that have reported in the last 24 hours, one card each.
  *
- *   1 scale   -> a time series is genuinely meaningful, so draw one.
- *   2 or more -> a plain table of the numbers, one row per UID.
+ * Cards rather than the bar chart this started as. The bars encoded
+ * RunningTotalWeight as a fill, which invited the reading "this bin is nearly
+ * full" — a meaning it never had, since it is a tare-relative counter that goes
+ * negative. Nothing here is drawn as a proportion of anything.
  *
- * Deliberately NOT a bar chart. The bars used to be scaled against whichever
- * scale reported most recently rather than the largest one, so a fleet whose
- * newest row happened to be 0.00 kg rendered every other scale pegged at full
- * width. Even scaled correctly, a bar of RunningTotalWeight invites the
- * reading "this bin is nearly full", which it never meant — it is a
- * tare-relative counter that can and does go negative. Numbers only.
+ * The one thing worth drawing is *when* a scale was busy, so each card carries
+ * a 2-hourly strip of its own deposits across the window. That is a real time
+ * axis rather than a disguised magnitude.
  */
-function LiveActivity({ readings, loading, zones, displayZone }) {
+function LiveActivity({ readings, isLive, loading, zones, displayZone }) {
   // Source zone = where the reading was recorded; display zone = what the
   // viewer picked. Equal (or unknown) means the stored value is shown as-is.
   const sourceOf = (uid) => zones?.[uid] || null;
   const shownIn = (uid) => displayZone || sourceOf(uid);
 
-  // Readings arrive newest-first, so the first row seen per UID is its latest.
+  // Scales that reported in the last 24 hours, newest first.
+  //
+  // Fed from the live feed AND the week of history together, on purpose. This
+  // panel used to read only /readings/live, which returns one of two very
+  // different things: the rows inside its narrow band when any match, and
+  // every device's last-known rows when none do. Once the band started
+  // matching, a minute in which one scale reported made the panel show that
+  // one scale — while Quick Scale Status, reading the full history, still
+  // showed seven. Both now derive from the same rows, so they cannot disagree.
   const { recent, hiddenCount } = useMemo(() => {
+    const now = Date.now();
     const map = new Map();
+
     readings.forEach((r) => {
+      // A UID with no scale record is absent from the zone map entirely, so it
+      // falls back to the fleet clock the same way a record without its own
+      // `timeZone` does.
+      const zone = zones?.[r.uid] || FLEET_TIME_ZONE;
+      const at = r.dateTime ? readingInstant(r.dateTime, zone) : null;
+      const age = at ? now - at.getTime() : null;
+      if (age == null) return;
+
       if (!map.has(r.uid)) {
+        // Rows arrive newest-first from both feeds, so the first sighting of a
+        // UID is its latest reading.
         map.set(r.uid, {
           uid: r.uid,
           runningTotal: r.runningTotalWeight ?? 0,
           lastReading: r.perDepositWeight ?? 0,
           lastAt: r.dateTime ?? '',
+          ageMs: age,
           deposited: 0,
+          deposits: 0,
+          strip: new Array(STRIP_BUCKETS).fill(0),
         });
       }
-      if (r.perDepositWeight > 0) map.get(r.uid).deposited += r.perDepositWeight;
+      // Only deposits inside the window count towards the window's totals —
+      // summing the whole seven days under a "last 24 h" heading would be a
+      // different number wearing the same label.
+      if (r.perDepositWeight > 0 && age >= 0 && age <= ONLINE_WINDOW_MS) {
+        const s = map.get(r.uid);
+        s.deposited += r.perDepositWeight;
+        s.deposits += 1;
+        // Oldest bucket on the left, so the strip reads left-to-right as time.
+        // Clamped at both ends: a reading landing exactly on the 24h boundary
+        // divides to STRIP_BUCKETS and would index -1, which counted towards
+        // the totals but vanished from the strip.
+        const slot = Math.max(
+          0,
+          Math.min(STRIP_BUCKETS - 1, STRIP_BUCKETS - 1 - Math.floor(age / BUCKET_MS))
+        );
+        s.strip[slot] += r.perDepositWeight;
+      }
     });
 
-    // The live endpoint falls back to each device's last known rows whenever
-    // its ±60s band matches nothing, which is nearly always. That fallback is
-    // what put the entire fleet on this panel at once — including scales whose
-    // "latest" reading is weeks old — so a panel titled Live was really just
-    // listing the whole estate. Keep only scales that have actually reported
-    // inside the same 24h window the Active Scales tile counts, so the two
-    // agree, and say how many were left out rather than dropping them quietly.
-    const now = Date.now();
-    const withAge = [...map.values()].map((s) => {
-      // A UID with no scale record is absent from the zone map entirely, so
-      // it falls back to the fleet clock the same way a record without its own
-      // `timeZone` does.
-      const at = s.lastAt
-        ? readingInstant(s.lastAt, zones?.[s.uid] || FLEET_TIME_ZONE)
-        : null;
-      return { ...s, ageMs: at ? now - at.getTime() : null };
-    });
-
+    const all = [...map.values()];
     // Most recently heard from first. This is a *live* panel: the thing that
-    // just reported is what you want at the top, not whichever bin happens to
-    // be fullest — that ordering barely changes and buries new activity.
-    const fresh = withAge
-      .filter((s) => s.ageMs != null && s.ageMs <= ONLINE_WINDOW_MS)
+    // just reported is what you want at the top.
+    const fresh = all
+      .filter((s) => s.ageMs <= ONLINE_WINDOW_MS)
       .sort((a, b) => a.ageMs - b.ageMs);
 
-    return { recent: fresh, hiddenCount: withAge.length - fresh.length };
+    return { recent: fresh, hiddenCount: all.length - fresh.length };
   }, [readings, zones]);
 
-  const single = recent.length === 1;
-
-  // Only built for the single-scale case, where a time axis means something.
-  const series = useMemo(() => {
-    if (!single) return [];
-    const uid = recent[0].uid;
-    return readings
-      .filter((r) => r.uid === uid)
-      .slice(0, 40)
-      .reverse()
-      .map((r) => ({ t: r.time?.slice(0, 5) ?? '', kg: r.runningTotalWeight }));
-  }, [readings, recent, single]);
-
   const totalDeposited = recent.reduce((sum, s) => sum + s.deposited, 0);
-  // The API marks rows false when nothing landed in the +/-60s band and it fell
-  // back to last-known data, so the badge never claims to be live when it isn't.
-  const isLive = readings.length > 0 && readings[0]?.isLive !== false;
+  const totalDeposits = recent.reduce((sum, s) => sum + s.deposits, 0);
 
   return (
     <ChartCard
       testId="live-waste-stream"
       title="Live Activity"
-      subtitle={
-        single
-          ? `${recent[0].uid} — running total over the last minute`
-          : 'Scales that have reported in the last 24 hours'
-      }
-      className="xl:col-span-3"
+      subtitle="Scales that have reported in the last 24 hours"
       action={
         <span
           className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border text-[11px] font-semibold uppercase tracking-wider ${
@@ -180,8 +177,9 @@ function LiveActivity({ readings, loading, zones, displayZone }) {
           }
         />
       ) : (
-        <>
-          <div className="flex items-baseline gap-6 px-3 pb-3 flex-wrap">
+        <div className="px-3">
+          {/* Window summary */}
+          <div className="flex items-center gap-6 flex-wrap pb-4 mb-4 border-b border-ink-600/40">
             <div>
               <div className="text-[11px] uppercase tracking-wider text-slate-400">
                 Reporting scales
@@ -199,91 +197,106 @@ function LiveActivity({ readings, loading, zones, displayZone }) {
                 <span className="text-sm text-slate-400 font-medium">kg</span>
               </div>
             </div>
+            <div>
+              <div className="text-[11px] uppercase tracking-wider text-slate-400">
+                Deposits
+              </div>
+              <div className="font-display font-bold text-2xl text-white tabular-nums">
+                {totalDeposits}
+              </div>
+            </div>
           </div>
 
-          {single ? (
-            <div className="h-56">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={series} margin={{ left: 0, right: 12, top: 8, bottom: 4 }}>
-                  <defs>
-                    <linearGradient id="liveGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#22C55E" stopOpacity={0.5} />
-                      <stop offset="100%" stopColor="#22C55E" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 4" stroke="#334155" vertical={false} />
-                  <XAxis dataKey="t" stroke="#64748B" fontSize={10} tickLine={false} axisLine={false} minTickGap={44} />
-                  <YAxis stroke="#64748B" fontSize={11} tickLine={false} axisLine={false} unit=" kg" width={46} />
-                  <Tooltip content={<ChartTooltip />} cursor={{ stroke: '#22C55E', strokeOpacity: 0.25 }} />
-                  <Area
-                    type="monotone"
-                    dataKey="kg"
-                    name="Running total"
-                    stroke="#22C55E"
-                    strokeWidth={2.5}
-                    fill="url(#liveGrad)"
-                    dot={false}
-                    isAnimationActive={false}
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-          ) : (
-            <div className="px-3">
-              <div className="flex items-center gap-3 pb-2 border-b border-ink-600/40 text-[10px] uppercase tracking-wider text-slate-500">
-                <span className="w-24 shrink-0">Scale</span>
-                <span className="flex-1 text-right">Last deposit</span>
-                <span
-                  className="w-24 shrink-0 text-right"
-                  title="RunningTotalWeight exactly as the device reports it — a counter since the last tare, not how full the bin is. It can read negative after a reset."
+          <div className="max-h-[26rem] overflow-y-auto grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-3 pr-1">
+            {recent.map((s) => {
+              const tone = freshness(s.ageMs);
+              const peak = Math.max(...s.strip, 0);
+              return (
+                <div
+                  key={s.uid}
+                  data-testid={`live-scale-${s.uid}`}
+                  className="rounded-xl border border-ink-600 bg-ink-800/50 p-3.5 hover:border-sky/40 transition-colors"
                 >
-                  Since tare
-                </span>
-                <span className="w-16 shrink-0 text-right">Reported</span>
-              </div>
-              <div className="h-48 overflow-y-auto divide-y divide-ink-600/25">
-                {recent.map((s) => (
-                  <div
-                    key={s.uid}
-                    className="flex items-center gap-3 py-2.5 hover:bg-ink-700/25 transition-colors"
-                    data-testid={`live-scale-${s.uid}`}
-                  >
-                    <span className="w-24 shrink-0 text-xs font-mono text-slate-300 truncate">
-                      {s.uid}
+                  <div className="flex items-center justify-between gap-2 mb-3">
+                    <span className="inline-flex items-center gap-2 min-w-0">
+                      <span className={`shrink-0 w-2 h-2 rounded-full ${tone.dot}`} />
+                      <span className="text-xs font-mono text-slate-200 truncate">
+                        {s.uid}
+                      </span>
                     </span>
                     <span
-                      className={`flex-1 text-right text-sm font-semibold tabular-nums ${
-                        s.lastReading > 0 ? 'text-leaf' : 'text-slate-400'
-                      }`}
-                    >
-                      {s.lastReading > 0 ? '+' : ''}
-                      {s.lastReading.toFixed(2)} kg
-                    </span>
-                    <span className="w-24 shrink-0 text-right text-xs text-slate-400 tabular-nums">
-                      {s.runningTotal.toFixed(2)} kg
-                    </span>
-                    <span
-                      className="w-16 shrink-0 text-right text-[10px] text-slate-500 tabular-nums"
+                      className={`shrink-0 text-[10px] tabular-nums ${tone.text}`}
                       title={
                         shownIn(s.uid)
-                          ? `${timeZoneAbbr(shownIn(s.uid))} · ${shownIn(s.uid)}`
+                          ? `${formatTime(s.lastAt, sourceOf(s.uid), displayZone, false)} · ${timeZoneAbbr(shownIn(s.uid))}`
                           : 'Scale has no time zone set — shown as recorded'
                       }
                     >
-                      {formatTime(s.lastAt, sourceOf(s.uid), displayZone, false)}
+                      {relativeTime(s.lastAt, sourceOf(s.uid) || FLEET_TIME_ZONE)}
                     </span>
                   </div>
-                ))}
-              </div>
-              {hiddenCount > 0 && (
-                <p className="pt-2.5 text-[11px] text-slate-500">
-                  {hiddenCount} {hiddenCount === 1 ? 'scale has' : 'scales have'} not
-                  reported in 24 h — see Quick Scale Status below.
-                </p>
-              )}
-            </div>
+
+                  <div className="flex items-end justify-between gap-2">
+                    <div className="min-w-0">
+                      <div
+                        className={`font-display font-bold text-xl tabular-nums leading-none ${
+                          s.lastReading > 0 ? 'text-leaf' : 'text-slate-400'
+                        }`}
+                      >
+                        {s.lastReading > 0 ? '+' : ''}
+                        {s.lastReading.toFixed(2)}
+                        <span className="text-xs text-slate-500 font-medium ml-1">kg</span>
+                      </div>
+                      <div className="text-[10px] uppercase tracking-wider text-slate-500 mt-1">
+                        Last deposit
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-sm font-semibold text-slate-200 tabular-nums leading-none">
+                        {s.deposited.toFixed(2)}
+                        <span className="text-[10px] text-slate-500 font-medium ml-0.5">kg</span>
+                      </div>
+                      <div className="text-[10px] text-slate-500 mt-1">
+                        {s.deposits} in 24 h
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* When this scale was busy, oldest slot on the left. Height
+                      is relative to this scale's own peak, so a quiet unit is
+                      still readable rather than a flat line beside a busy one. */}
+                  <div className="flex items-end gap-[2px] h-6 mt-3" aria-hidden>
+                    {s.strip.map((kg, i) => (
+                      <div
+                        key={i}
+                        className={`flex-1 rounded-[2px] ${kg > 0 ? 'bg-sky/70' : 'bg-ink-700'}`}
+                        style={{ height: peak > 0 && kg > 0 ? `${Math.max(18, (kg / peak) * 100)}%` : '10%' }}
+                        title={`${(STRIP_BUCKETS - i) * 2}-${(STRIP_BUCKETS - i - 1) * 2} h ago — ${kg.toFixed(2)} kg`}
+                      />
+                    ))}
+                  </div>
+                  <div className="flex justify-between text-[9px] text-slate-600 mt-1">
+                    <span>24 h ago</span>
+                    <span
+                      className="text-slate-500"
+                      title="RunningTotalWeight as the device reports it — a counter since the last tare, not how full the bin is."
+                    >
+                      {s.runningTotal.toFixed(2)} kg since tare
+                    </span>
+                    <span>now</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {hiddenCount > 0 && (
+            <p className="pt-3 text-[11px] text-slate-500">
+              {hiddenCount} {hiddenCount === 1 ? 'scale has' : 'scales have'} not
+              reported in 24 h — see Quick Scale Status below.
+            </p>
           )}
-        </>
+        </div>
       )}
     </ChartCard>
   );
@@ -410,41 +423,6 @@ function AlertRow({ alert }) {
   );
 }
 
-function IncomingFeed({ readings, loading, zones, displayZone }) {
-  return (
-    <ChartCard
-      testId="incoming-feed"
-      title="Incoming Readings"
-      subtitle="Most recent captures as scales report in"
-      className="xl:col-span-2"
-    >
-      {loading ? (
-        <div className="px-3 py-6 text-sm text-slate-400">Loading…</div>
-      ) : readings.length === 0 ? (
-        <EmptyState testId="incoming-feed-empty" icon={Inbox} title="Nothing reported yet" />
-      ) : (
-        <ul className="divide-y divide-ink-600/40">
-          {readings.slice(0, 7).map((r, i) => (
-            <li key={`${r.uid}-${r.time}-${i}`} className="px-3 py-2.5 flex items-center gap-3 hover:bg-ink-700/25 rounded-md transition-colors">
-              <span className="w-2 h-2 rounded-full shrink-0 bg-sky" />
-              <div className="flex-1 min-w-0">
-                <div className="text-sm text-white truncate">{r.uid}</div>
-                <div className="text-xs text-slate-500 truncate">{r.message1 || 'Deposit'} · {r.date}</div>
-              </div>
-              <div className="text-right">
-                <div className="text-sm font-semibold text-slate-100 tabular-nums">{r.perDepositWeight?.toFixed(2)} kg</div>
-                <div className="text-[10px] uppercase tracking-wider text-slate-500 tabular-nums">
-                  {formatTime(r.dateTime, zones?.[r.uid] || null, displayZone, false)}
-                </div>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </ChartCard>
-  );
-}
-
 /* -------------------------------- Page --------------------------------- */
 
 export default function Dashboard() {
@@ -465,8 +443,9 @@ export default function Dashboard() {
   // the page can say "updating" rather than either lying about its freshness or
   // blanking panels that hold perfectly good rows.
   const [refreshing, setRefreshing] = useState(false);
-  // Newest DateTime already loaded — the cursor for incremental refreshes.
-  const newestSeen = useRef(cached.newestSeen);
+  // Whether the full history window has been fetched yet. The first load pulls
+  // the whole week; refreshes only re-read the recent window.
+  const loadedFullWindow = useRef(cached.readings.length > 0);
 
   // Two refresh cadences, because the queries cost very different amounts.
   //
@@ -496,11 +475,11 @@ export default function Dashboard() {
       if (document.hidden && !force) return;
       setRefreshing(true);
 
-      // After the first load, ask only for rows newer than the newest one we
-      // already hold. A quiet minute then costs an empty response instead of
-      // re-sending the whole week.
-      const newest = newestSeen.current;
-      const readingsCall = newest ? getReadingsSince(newest) : getReadings();
+      // The first load takes the full week; every refresh after it re-reads
+      // only the recent window. See REFRESH_LOOKBACK_DAYS.
+      const readingsCall = loadedFullWindow.current
+        ? getReadings({ days: REFRESH_LOOKBACK_DAYS })
+        : getReadings();
 
       // Only replace on success — a transient failure shouldn't blank a panel
       // that already holds good data, so every rejection is swallowed here and
@@ -527,38 +506,25 @@ export default function Dashboard() {
         }),
         apply(readingsCall, (value) => {
           const incoming = value || [];
-          if (incoming.length) {
-            newestSeen.current = incoming.reduce(
-              (max, r) => (r.dateTime > max ? r.dateTime : max),
-              newestSeen.current || ''
-            );
-          }
+          const wasFirst = !loadedFullWindow.current;
+          loadedFullWindow.current = true;
+
           setReadings((prev) => {
-            let next;
-            if (!newest) {
-              next = incoming;                       // first load: full set
-            } else if (!incoming.length) {
-              next = prev;                           // nothing new
-            } else {
-              // Merge newest-first, de-duplicating on UID + timestamp.
-              //
-              // The dedupe is not belt-and-braces: an older deployment of the
-              // readings Lambda ignores `since` and replies with the whole
-              // window, which would otherwise stack the same rows on every
-              // poll. Keying the merge makes the client correct either way.
-              const merged = [...incoming, ...prev];
-              const seen = new Set();
-              const unique = [];
-              for (const r of merged) {
-                const key = `${r.uid}|${r.dateTime}`;
-                if (seen.has(key)) continue;
-                seen.add(key);
-                unique.push(r);
-              }
-              unique.sort((a, b) => (a.dateTime < b.dateTime ? 1 : -1));
-              next = unique.slice(0, MAX_TABLE_ROWS);
+            // Merge newest-first, de-duplicating on UID + timestamp. Every
+            // refresh overlaps what is already held, so the dedupe is what
+            // makes a repeated window cheap rather than duplicative.
+            const merged = wasFirst ? incoming : [...incoming, ...prev];
+            const seen = new Set();
+            const unique = [];
+            for (const r of merged) {
+              const key = `${r.uid}|${r.dateTime}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              unique.push(r);
             }
-            writeDashboardCache({ readings: next, newestSeen: newestSeen.current });
+            unique.sort((a, b) => (a.dateTime < b.dateTime ? 1 : -1));
+            const next = unique.slice(0, MAX_TABLE_ROWS);
+            writeDashboardCache({ readings: next });
             return next;
           });
         }),
@@ -618,87 +584,29 @@ export default function Dashboard() {
   // an genuinely unknown source, and guessing the viewer's zone would silently
   // shift its timestamps by however far apart the two happen to be.
   const zones = useMemo(() => buildZoneMap(scales, FLEET_TIME_ZONE), [scales]);
+
+  // The live feed in front of the week of history, newest-first. Quick Scale
+  // Status already merges these two; Live Activity now reads the same list, so
+  // the two panels cannot report different counts for the same window.
+  const liveAndHistory = useMemo(() => [...live, ...readings], [live, readings]);
+
+  // The API marks rows false when nothing landed in the +/-60s band and it fell
+  // back to last-known data, so the badge never claims to be live when it is
+  // not. Read from the live feed alone — history is by definition not live.
+  const liveIsFresh = live.length > 0 && live[0]?.isLive !== false;
   const { fixedZone: displayZone } = useTimeZonePreference();
 
   // `lastReading`, `lastActive` and `status` are stored on the scale record but
   // nothing ever writes to them, so they'd read 0 kg / blank forever. Derive
   // them from the telemetry we already have instead: a scale is "online" if it
   // has actually reported recently, not because a field says so.
-  const scaleStatuses = useMemo(() => {
-    const latest = new Map();
-    // readings and live are both newest-first, so first sighting per UID wins.
-    [...live, ...readings].forEach((r) => {
-      if (!latest.has(r.uid)) latest.set(r.uid, r);
-    });
-
-    const now = Date.now();
-    const rank = { online: 0, maintenance: 1, idle: 2, silent: 3, unknown: 4 };
-
-    return scales
-      .map((sc) => {
-        const id = sc.scaleId || sc.id;
-        const last = latest.get(id);
-        const lastAt = last?.dateTime || null;
-        // Age is an elapsed duration, so it needs a real instant. A scale with
-        // no `timeZone` of its own is read on the fleet clock rather than the
-        // viewer's — the difference between one assumption stated once and a
-        // different guess for every person who opens the page.
-        const ownZone = Boolean(sc.timeZone);
-        const sourceZone = sc.timeZone || FLEET_TIME_ZONE;
-        const lastInstant = lastAt ? readingInstant(lastAt, sourceZone) : null;
-        const ageMs = lastInstant ? now - lastInstant.getTime() : null;
-
-        let state;
-        if (sc.status === 'maintenance') state = 'maintenance';   // admin override
-        else if (ageMs == null) state = 'unknown';
-        else if (ageMs <= ONLINE_WINDOW_MS) state = 'online';
-        else if (ageMs <= IDLE_WINDOW_MS) state = 'idle';
-        else state = 'silent';
-
-        return {
-          id,
-          name: sc.name || id,
-          location: sc.location || '',
-          state,
-          stateLabel:
-            state === 'online' ? 'active'
-              : state === 'maintenance' ? 'maintenance'
-              : state === 'idle' ? 'quiet'
-              : state === 'silent' ? 'silent'
-              : 'no data',
-          lastKg: last?.perDepositWeight ?? null,
-          ageMs,
-          // Whether this row's clock came from the scale's own record or from
-          // the fleet default. Surfaced in the tooltip rather than as body
-          // text: with the default applied it is true of most rows, and a
-          // marker on every row is noise rather than information.
-          ownZone,
-          sourceZone,
-          lastSeenLabel: lastAt
-            ? relativeTime(lastAt, sourceZone, now)
-            : 'never reported',
-        };
-      })
-      // Ordered by how recently each scale reported, newest first — the
-      // question this panel answers is "who have I heard from lately", and
-      // the old tie-break on name meant five scales that all reported today
-      // came back in alphabetical order, burying the one that just checked in.
-      //
-      // Sorting on age also reproduces the active -> quiet -> silent grouping
-      // for free, since those tiers are cut from the same number. The one
-      // exception is `maintenance`, which is an admin flag rather than an
-      // observation, so it keeps its own slot in `rank` and is placed by tier
-      // first. Scales that have never reported have no age and sort last.
-      .sort((a, b) => {
-        const tier = rank[a.state] === 1 || rank[b.state] === 1
-          ? rank[a.state] - rank[b.state]
-          : 0;
-        if (tier) return tier;
-        if (a.ageMs == null) return b.ageMs == null ? a.name.localeCompare(b.name) : 1;
-        if (b.ageMs == null) return -1;
-        return a.ageMs - b.ageMs;
-      });
-  }, [scales, readings, live]);
+  // Derived from telemetry, not from the stored `status` field — see
+  // lib/scaleStatus.js. Shared with Scale Management so the two pages cannot
+  // report different counts for the same fleet.
+  const scaleStatuses = useMemo(
+    () => deriveScaleStatuses(scales, latestByUid(live, readings)),
+    [scales, readings, live]
+  );
 
   const totalActive = scaleStatuses.filter((s) => s.state === 'online').length;
 
@@ -876,10 +784,13 @@ export default function Dashboard() {
       </div>
 
       {/* Recent activity */}
-      <div className="grid grid-cols-1 xl:grid-cols-5 gap-4 lg:gap-6">
-        <LiveActivity readings={live} loading={liveLoading} zones={zones} displayZone={displayZone} />
-        <IncomingFeed readings={live} loading={liveLoading} zones={zones} displayZone={displayZone} />
-      </div>
+      <LiveActivity
+        readings={liveAndHistory}
+        isLive={liveIsFresh}
+        loading={liveLoading}
+        zones={zones}
+        displayZone={displayZone}
+      />
 
       {/* Weekly readings table — raw device export shape, searchable/sortable/paginated */}
       <ChartCard
@@ -894,6 +805,7 @@ export default function Dashboard() {
           zones={zones}
           data={readings}
           pageSize={8}
+          filterable
           emptyLabel="No readings in the selected window."
         />
       </ChartCard>

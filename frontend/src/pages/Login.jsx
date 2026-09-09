@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Eye, EyeOff, ArrowRight, Apple, CookingPot, Carrot, Salad, Cookie, IceCream, Leaf } from 'lucide-react';
+import { Eye, EyeOff, ArrowRight, ArrowLeft, Apple, CookingPot, Carrot, Salad, Cookie, IceCream, Leaf } from 'lucide-react';
 import { toast } from 'sonner';
 import { login, isAuthenticated } from '../services/auth';
 import LoadingSpinner from '../components/common/LoadingSpinner.jsx';
@@ -77,6 +77,19 @@ export default function Login() {
         className="relative z-10 w-full max-w-md"
       >
         <div className="glass-strong rounded-3xl border border-ink-600/70 shadow-[0_30px_80px_-30px_rgba(56,189,248,0.35)] p-8 sm:p-10">
+          {/* Sign-in and sign-up were both dead ends: arriving here from the
+              landing page left no way back to it short of the browser button,
+              and after a sign-out that is the only route anyone has. */}
+          <button
+            type="button"
+            onClick={() => navigate('/')}
+            data-testid="back-to-home"
+            className="inline-flex items-center gap-1.5 -mt-2 mb-4 text-xs text-slate-400 hover:text-white transition-colors"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            Back to home
+          </button>
+
           {/* Logo */}
           <div className="flex flex-col items-center text-center mb-7">
             <div className="relative grid place-items-center w-16 h-16 rounded-2xl bg-leaf-gradient shadow-[0_10px_28px_-6px_rgba(34,197,94,0.55)] mb-4">

@@ -37,3 +37,26 @@ export async function getLiveReadings(seconds) {
   });
   return data;
 }
+
+/**
+ * How many readings exist for one scale.
+ *
+ * Used by the purge confirmation so it can state a real number rather than
+ * "all data" — an admin should know the size of what they are about to
+ * destroy before they type anything.
+ */
+export async function countReadingsForScale(uid) {
+  const { data } = await readingsApi.get('/readings/count', { params: { uid } });
+  return data; // { uid, rows }
+}
+
+/**
+ * Permanently deletes every reading for one scale. Admin only.
+ *
+ * Irreversible: DynamoDB has no undo and these rows are the only copy. The
+ * scale's own record is left intact — this clears telemetry, not provisioning.
+ */
+export async function purgeReadingsForScale(uid) {
+  const { data } = await readingsApi.delete('/readings', { params: { uid } });
+  return data; // { uid, deleted, complete }
+}

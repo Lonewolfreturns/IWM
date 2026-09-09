@@ -50,7 +50,12 @@ def read_uids(csv_path: str):
                     f"No 'UID' column found. Columns present: {reader.fieldnames}"
                 )
             for row in reader:
-                uid = (row.get("UID") or "").strip().upper()
+                # Stored exactly as the device reports it. Upper-casing
+                # here created scale records the readings could never be
+                # joined to: the readings table keeps the original spelling,
+                # so an imported "SCOTTTEST4" and its readings under
+                # "Scotttest4" looked like two different devices.
+                uid = (row.get("UID") or "").strip()
                 if not uid:
                     continue
                 if uid not in counts:

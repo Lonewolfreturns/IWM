@@ -6,7 +6,6 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { signup, isAuthenticated } from '../services/auth';
-import { CANADIAN_LOCATIONS } from '../data/mockData';
 import LoadingSpinner from '../components/common/LoadingSpinner.jsx';
 import SelectMenu from '../components/common/SelectMenu.jsx';
 
@@ -33,7 +32,7 @@ export default function SignUp() {
 
   const [name, setName] = useState('');
   const [organization, setOrganization] = useState('');
-  const [city, setCity] = useState(CANADIAN_LOCATIONS[0].city);
+  const [city, setCity] = useState('');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -59,6 +58,10 @@ export default function SignUp() {
       toast.error('Passwords do not match');
       return;
     }
+    if (!city.trim()) {
+      toast.error('Please enter your city');
+      return;
+    }
     if (!secretAnswer.trim()) {
       toast.error('Please answer your secret question');
       return;
@@ -69,7 +72,7 @@ export default function SignUp() {
       const { user } = await signup({
         name,
         organization,
-        city,
+        city: city.trim(),
         phone,
         email,
         password,
@@ -107,6 +110,18 @@ export default function SignUp() {
         className="relative z-10 w-full max-w-lg"
       >
         <div className="glass-strong rounded-3xl border border-ink-600/70 shadow-[0_30px_80px_-30px_rgba(56,189,248,0.35)] p-8 sm:p-10">
+          {/* Same dead end as the sign-in page: nothing here led back to the
+              landing page except the browser's own back button. */}
+          <button
+            type="button"
+            onClick={() => navigate('/')}
+            data-testid="back-to-home"
+            className="inline-flex items-center gap-1.5 -mt-2 mb-4 text-xs text-slate-400 hover:text-white transition-colors"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            Back to home
+          </button>
+
           <div className="flex flex-col items-center text-center mb-7">
             <div className="relative grid place-items-center w-16 h-16 rounded-2xl bg-leaf-gradient shadow-[0_10px_28px_-6px_rgba(34,197,94,0.55)] mb-4">
               <span className="font-display font-extrabold text-xl text-ink-900 tracking-tighter" aria-hidden>
@@ -161,14 +176,23 @@ export default function SignUp() {
                 <label htmlFor="city" className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
                   City
                 </label>
-                <SelectMenu
+                {/* Free text, not a dropdown. The list it used to offer held six
+                    cities and neither Halifax nor Guelph was among them, so the
+                    sites actually running scales could not enter where they
+                    were — and a fixed list is wrong in principle anyway, since
+                    an organisation can open somewhere new without the app
+                    shipping a release. */}
+                <input
+                  id="city"
+                  type="text"
+                  required
                   value={city}
-                  onChange={setCity}
-                  options={CANADIAN_LOCATIONS.map((l) => ({
-                    value: l.city,
-                    label: `${l.city}, ${l.province}`,
-                  }))}
-                  testId="signup-city-select"
+                  onChange={(e) => setCity(e.target.value)}
+                  placeholder="Halifax, NS"
+                  autoComplete="address-level2"
+                  maxLength={80}
+                  data-testid="signup-city-input"
+                  className="w-full h-12 px-4 rounded-xl bg-ink-800/60 border border-ink-600 text-slate-100 placeholder:text-slate-500 outline-none focus:border-sky/60 focus:shadow-glow transition-all"
                 />
               </div>
               <div>

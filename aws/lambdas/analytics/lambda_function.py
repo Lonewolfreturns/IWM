@@ -302,19 +302,33 @@ def discover_uids():
     return _uid_cache["uids"]
 
 
-def org_scales(org: str):
-    """Full scale records for one organization — needed for meal schedules."""
-    if not org:
+# ---------------------------------------------------------------------------
+# ACCESS SCOPE: per assigned user, not per organization.
+#
+# A scale is visible to the one account it is assigned to. It used to be scoped
+# by that person's ORGANIZATION, so every colleague sharing an `organization`
+# string saw the whole site's scales — which made "assign to a person" and
+# "share with a company" the same act, and meant a typo'd organization on a
+# user record silently widened or narrowed what they could see.
+#
+# `organization` is still stored on both records and still shown in the UI. It
+# is a label now, not a permission.
+# ---------------------------------------------------------------------------
+
+def assigned_scales(email: str):
+    """Full records of every scale this user is an assignee of."""
+    email = (email or "").strip().lower()
+    if not email:
         return []
     try:
         result = _scales.scan(
-            FilterExpression="#o = :o",
-            ExpressionAttributeNames={"#o": "organization"},
-            ExpressionAttributeValues={":o": org},
+            FilterExpression="contains(#ae, :e) OR #a = :e",
+            ExpressionAttributeNames={"#ae": "assignedEmails", "#a": "assignedEmail"},
+            ExpressionAttributeValues={":e": email},
         )
         return result.get("Items", [])
     except ClientError as err:
-        print(f"ERROR org_scales: {err}")
+        print(f"ERROR assigned_scales: {err}")
         return []
 
 
@@ -370,6 +384,30 @@ def query_edge(uid, boundary_iso, direction):
         return None
 
 
+def resolve_uid(wanted: str, allowed):
+    """
+    Matches a requested UID against the ones this caller may read, ignoring case.
+
+    UIDs are whatever the device was provisioned with, and this fleet is not
+    consistent about it: DAL00003 and GUELPH01 sit alongside Scotttest4,
+    ScottTest, "Community Day" and Test. The request used to be upper-cased
+    before the membership test, so "Scotttest4" became "SCOTTTEST4", matched
+    nothing, and came back 403 "not assigned to you" — for eight of eighteen
+    scales, to an admin who could see every one of them in the list.
+
+    Returns the UID in its stored spelling, because DynamoDB partition keys are
+    case-sensitive: matching loosely is only safe if the query then uses the
+    exact stored form. None means no such UID is readable by this caller.
+    """
+    if not wanted:
+        return None
+    target = wanted.strip().lower()
+    for uid in allowed:
+        if str(uid).strip().lower() == target:
+            return str(uid)
+    return None
+
+
 def scoped_uids(claims, wanted_uid):
     """
     UIDs this caller may read, narrowed to one if requested.
@@ -381,15 +419,20 @@ def scoped_uids(claims, wanted_uid):
         allowed = discover_uids()
     else:
         allowed = [
-            str(s.get("scaleId")) for s in org_scales(claims.get("org", "")) if s.get("scaleId")
+            str(s.get("scaleId")) for s in assigned_scales(claims.get("email", "")) if s.get("scaleId")
         ]
 
     if wanted_uid:
-        if wanted_uid not in allowed:
+        # Matched case-insensitively, then queried with the stored spelling —
+        # see resolve_uid. The readings and reports Lambdas were changed to do
+        # this and analytics was left on an exact match, so a scale like
+        # "Scotttest4" still failed here while working everywhere else.
+        match = resolve_uid(wanted_uid, allowed)
+        if not match:
             return None, respond(
-                403, {"message": "That scale is not assigned to your organization"}
+                403, {"message": "That scale is not assigned to you"}
             )
-        return [wanted_uid], None
+        return [match], None
     return allowed, None
 
 
@@ -886,10 +929,14 @@ def lambda_handler(event, context):
         if err:
             return err
 
-        wanted_uid = (params.get("uid") or "").strip().upper()
+        wanted_uid = (params.get("uid") or "").strip()
         uids, err = scoped_uids(claims, wanted_uid)
         if err:
             return err
+        # Adopt the stored spelling, so the per-scale lookups and labels below
+        # use the same string the table is keyed on.
+        if wanted_uid:
+            wanted_uid = uids[0]
 
         if not uids:
             empty = {
@@ -901,7 +948,7 @@ def lambda_handler(event, context):
                 "daysWithData": 0,
                 "missing": [{"from": date_from.isoformat(), "to": date_to.isoformat()}],
                 "nearest": {"before": None, "after": None},
-                "message": "No scales are assigned to your organization yet.",
+                "message": "No scales are assigned to you yet.",
             }
             return respond(200, envelope(empty, []))
 
@@ -959,7 +1006,7 @@ def lambda_handler(event, context):
                     if item:
                         records.append(item)
             else:
-                records = org_scales(claims.get("org", ""))
+                records = assigned_scales(claims.get("email", ""))
             names = {
                 str(s.get("scaleId")): str(s.get("name") or s.get("scaleId"))
                 for s in records

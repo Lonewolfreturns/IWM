@@ -1,6 +1,5 @@
 import { Suspense, lazy } from 'react';
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
-import { AnimatePresence, motion } from 'framer-motion';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import { isAuthenticated } from './services/auth';
 import MainLayout from './layouts/MainLayout.jsx';
@@ -18,69 +17,59 @@ const DataConfiguration = lazy(() => import('./pages/DataConfiguration.jsx'));
 const SystemLogs = lazy(() => import('./pages/SystemLogs.jsx'));
 const Settings = lazy(() => import('./pages/Settings.jsx'));
 
-const pageTransition = {
-  initial: { opacity: 0, y: 18 },
-  animate: { opacity: 1, y: 0 },
-  exit: { opacity: 0, y: -10 },
-  transition: { duration: 0.35, ease: [0.22, 1, 0.36, 1] },
-};
-
-// The Suspense boundary lives INSIDE the animated wrapper on purpose. If it
-// sits outside <AnimatePresence>, a lazily-loaded route chunk suspending will
-// unmount the whole AnimatePresence subtree mid-transition, so its exit/enter
-// cycle never completes and the page silently never swaps — the URL changes
-// but the old screen stays on display. Keeping it here means only the page
-// body suspends; the motion element AnimatePresence is tracking stays mounted.
-function AnimatedPage({ children }) {
-  return (
-    <motion.div
-      initial={pageTransition.initial}
-      animate={pageTransition.animate}
-      exit={pageTransition.exit}
-      transition={pageTransition.transition}
-      className="relative z-10"
-    >
-      <Suspense
-        fallback={
-          <div className="flex min-h-[60vh] w-full items-center justify-center">
-            <LoadingSpinner size={40} />
-          </div>
-        }
-      >
-        {children}
-      </Suspense>
-    </motion.div>
-  );
-}
+/*
+ * ROUTE TRANSITIONS WERE REMOVED, AND THIS IS WHY.
+ *
+ * Every top-level route used to be wrapped in a motion.div inside
+ * `<AnimatePresence mode="wait">`, with `<Routes location={location}
+ * key={location.pathname}>` as the direct child. That is the pattern the
+ * framer/react-router docs describe, and here it broke navigation outright:
+ * clicking "Sign in" on the landing page changed the URL to /login and left
+ * the landing page on screen indefinitely. Only a full page reload moved.
+ *
+ * Measured, not guessed. With `mode="wait"` the incoming route never mounted
+ * at all. With it removed, the incoming route mounted but the outgoing one was
+ * never unmounted — both rendered, stacked, forever. That is the signature of
+ * an exit animation whose completion callback never fires: `mode="wait"` waits
+ * on it before mounting the next page, and without the mode nothing ever calls
+ * safeToRemove. The exiting subtree here is a keyed `<Routes>` holding a
+ * lazily-loaded chunk, and a suspending child in that position is enough to
+ * lose the callback.
+ *
+ * Rather than keep fighting it, the route-level transition is gone. Nothing
+ * visual was really lost: every page already animates itself on mount — the
+ * auth cards have their own motion.div, the dashboard tiles stagger in — so
+ * pages still arrive with movement, they just arrive reliably.
+ *
+ * Suspense stays at the top so a lazy chunk shows one spinner while it loads.
+ */
 
 export default function App() {
-  const location = useLocation();
-
   return (
-    <AnimatePresence mode="wait">
-      <Routes location={location} key={location.pathname}>
+    <Suspense
+      fallback={
+        <div className="flex min-h-[60vh] w-full items-center justify-center">
+          <LoadingSpinner size={40} />
+        </div>
+      }
+    >
+      <Routes>
           <Route
             path="/"
             element={
-              <AnimatedPage>
-                <Landing />
-              </AnimatedPage>
+              <Landing />
             }
           />
           <Route
             path="/login"
             element={
-              <AnimatedPage>
-                <Login />
-              </AnimatedPage>
+              <Login />
             }
           />
           <Route
             path="/signup"
             element={
-              <AnimatedPage>
-                <SignUp />
-              </AnimatedPage>
+              <SignUp />
             }
           />
 
@@ -94,34 +83,26 @@ export default function App() {
             <Route
               path="/dashboard"
               element={
-                <AnimatedPage>
-                  <Dashboard />
-                </AnimatedPage>
+                <Dashboard />
               }
             />
             <Route
               path="/analytics"
               element={
-                <AnimatedPage>
-                  <Analytics />
-                </AnimatedPage>
+                <Analytics />
               }
             />
             <Route
               path="/reports"
               element={
-                <AnimatedPage>
-                  <Reports />
-                </AnimatedPage>
+                <Reports />
               }
             />
             <Route
               path="/scales"
               element={
                 <ProtectedRoute requireAdmin>
-                  <AnimatedPage>
-                    <ScaleManagement />
-                  </AnimatedPage>
+                  <ScaleManagement />
                 </ProtectedRoute>
               }
             />
@@ -129,9 +110,7 @@ export default function App() {
               path="/users"
               element={
                 <ProtectedRoute requireAdmin>
-                  <AnimatedPage>
-                    <UserManagement />
-                  </AnimatedPage>
+                  <UserManagement />
                 </ProtectedRoute>
               }
             />
@@ -139,9 +118,7 @@ export default function App() {
               path="/data-config"
               element={
                 <ProtectedRoute requireAdmin>
-                  <AnimatedPage>
-                    <DataConfiguration />
-                  </AnimatedPage>
+                  <DataConfiguration />
                 </ProtectedRoute>
               }
             />
@@ -149,18 +126,14 @@ export default function App() {
               path="/system-logs"
               element={
                 <ProtectedRoute requireAdmin>
-                  <AnimatedPage>
-                    <SystemLogs />
-                  </AnimatedPage>
+                  <SystemLogs />
                 </ProtectedRoute>
               }
             />
             <Route
               path="/settings"
               element={
-                <AnimatedPage>
-                  <Settings />
-                </AnimatedPage>
+                <Settings />
               }
             />
           </Route>
@@ -174,6 +147,6 @@ export default function App() {
             element={<Navigate to={isAuthenticated() ? '/dashboard' : '/login'} replace />}
           />
       </Routes>
-    </AnimatePresence>
+    </Suspense>
   );
 }

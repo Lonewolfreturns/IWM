@@ -54,6 +54,36 @@ export async function signup({
   return data;
 }
 
+/**
+ * Changes the signed-in user's password and/or security question.
+ *
+ * The current password AND secret answer are re-checked server-side even
+ * though the request is already authenticated: a live session can be a
+ * borrowed laptop, and what is being replaced here is the credential that
+ * grants access afterwards.
+ *
+ * Pass only the parts being changed. The API returns a fresh token, which is
+ * persisted so the session is not left holding one minted against credentials
+ * that no longer exist.
+ */
+export async function changeCredentials({
+  currentPassword,
+  currentSecretAnswer,
+  newPassword,
+  newSecretQuestion,
+  newSecretAnswer,
+}) {
+  const { data } = await authApi.post('/auth/credentials', {
+    currentPassword,
+    currentSecretAnswer,
+    ...(newPassword ? { newPassword } : {}),
+    ...(newSecretQuestion ? { newSecretQuestion } : {}),
+    ...(newSecretAnswer ? { newSecretAnswer } : {}),
+  });
+  persistSession(data.token, data.user);
+  return data;
+}
+
 export function logout() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USER_KEY);

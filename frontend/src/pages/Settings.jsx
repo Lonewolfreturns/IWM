@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   User, MapPin, Scale as ScaleIcon, Coffee, Utensils, UtensilsCrossed,
-  Cookie, Moon, ExternalLink, Clock3,
+  Cookie, Moon, ExternalLink, Clock3, ShieldCheck, Eye, EyeOff,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -9,12 +9,21 @@ import ChartCard from '../components/common/ChartCard.jsx';
 import Badge from '../components/common/Badge.jsx';
 import DataTable from '../components/common/DataTable.jsx';
 import ClockTimePicker from '../components/common/ClockTimePicker.jsx';
-import { getCurrentUser } from '../services/auth';
+import { getCurrentUser, changeCredentials } from '../services/auth';
 import { getScales, updateScale } from '../services/scales';
-import { getUsers } from '../services/users';
 import { updateMyProfile } from '../services/profile';
 import SelectMenu from '../components/common/SelectMenu.jsx';
 import { COMMON_TIME_ZONES } from '../lib/time.js';
+
+// Kept in step with SECRET_QUESTIONS in SignUp.jsx — a question set here has
+// to be one the login screen can show back to the user.
+const SECRET_QUESTIONS = [
+  'What is your favorite food?',
+  'What was the name of your first pet?',
+  'What city were you born in?',
+  'What is your mother’s maiden name?',
+  'What was the name of your first school?',
+];
 
 const MEAL_PERIODS = [
   { key: 'breakfast', label: 'Breakfast', Icon: Coffee, defaultFrom: '07:00', defaultTo: '09:00' },
@@ -34,6 +43,242 @@ function StatusDot({ status }) {
   const color =
     status === 'online' ? 'bg-leaf shadow-[0_0_8px_#22C55E]' : status === 'maintenance' ? 'bg-amber' : 'bg-red-500';
   return <span className={`shrink-0 w-2.5 h-2.5 rounded-full ${color}`} />;
+}
+
+/* -------------------------- Security (all roles) -------------------------- */
+
+function PasswordField({ id, label, value, onChange, placeholder, autoComplete }) {
+  const [shown, setShown] = useState(false);
+  return (
+    <div>
+      <label htmlFor={id} className="block text-[11px] uppercase tracking-wider text-slate-400 mb-1.5">
+        {label}
+      </label>
+      <div className="relative">
+        <input
+          id={id}
+          type={shown ? 'text' : 'password'}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          autoComplete={autoComplete}
+          data-testid={id}
+          className="w-full h-11 pl-3 pr-11 rounded-xl bg-ink-800/60 border border-ink-600 text-sm text-slate-100 placeholder:text-slate-500 outline-none focus:border-sky/60"
+        />
+        <button
+          type="button"
+          onClick={() => setShown((v) => !v)}
+          aria-label={shown ? 'Hide' : 'Show'}
+          className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
+        >
+          {shown ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Password and security-question changes.
+ *
+ * Both live on one card and behind one re-authentication, because they are the
+ * same kind of change and someone rotating their credentials usually wants
+ * both — which should cost one round of typing, not two.
+ */
+function SecurityTab({ user }) {
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [currentSecretAnswer, setCurrentSecretAnswer] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [newSecretQuestion, setNewSecretQuestion] = useState(
+    user.secretQuestion || SECRET_QUESTIONS[0]
+  );
+  const [newSecretAnswer, setNewSecretAnswer] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const wantsPassword = Boolean(newPassword || confirmPassword);
+  const wantsSecret = Boolean(newSecretAnswer);
+
+  const reset = () => {
+    setCurrentPassword('');
+    setCurrentSecretAnswer('');
+    setNewPassword('');
+    setConfirmPassword('');
+    setNewSecretAnswer('');
+  };
+
+  const handleSave = async () => {
+    if (!wantsPassword && !wantsSecret) {
+      toast.error('Enter a new password or a new secret answer');
+      return;
+    }
+    if (wantsPassword && newPassword.length < 8) {
+      toast.error('New password must be at least 8 characters');
+      return;
+    }
+    if (wantsPassword && newPassword !== confirmPassword) {
+      toast.error('New passwords do not match');
+      return;
+    }
+    if (!currentPassword || !currentSecretAnswer.trim()) {
+      toast.error('Enter your current password and secret code to confirm');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const { changed } = await changeCredentials({
+        currentPassword,
+        currentSecretAnswer: currentSecretAnswer.trim(),
+        newPassword: wantsPassword ? newPassword : undefined,
+        newSecretQuestion: wantsSecret ? newSecretQuestion : undefined,
+        newSecretAnswer: wantsSecret ? newSecretAnswer.trim() : undefined,
+      });
+      const what = (changed || [])
+        .map((c) => (c === 'password' ? 'password' : 'security question'))
+        .join(' and ');
+      toast.success(`Updated your ${what || 'credentials'}`, {
+        description: 'Use the new details next time you sign in.',
+      });
+      reset();
+    } catch (err) {
+      toast.error(err?.response?.data?.message || 'Could not save the change');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <ChartCard
+      testId="security-card"
+      title="Password & Security"
+      subtitle="Change your password or your security question"
+    >
+      <div className="px-2 space-y-6">
+        <section className="space-y-4">
+          <h4 className="text-xs uppercase tracking-wider text-slate-400 font-semibold">
+            New password
+          </h4>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <PasswordField
+              id="new-password"
+              label="New password"
+              value={newPassword}
+              onChange={setNewPassword}
+              placeholder="At least 8 characters"
+              autoComplete="new-password"
+            />
+            <PasswordField
+              id="confirm-new-password"
+              label="Confirm new password"
+              value={confirmPassword}
+              onChange={setConfirmPassword}
+              placeholder="Re-enter new password"
+              autoComplete="new-password"
+            />
+          </div>
+          <p className="text-[11px] text-slate-500">
+            Leave both blank to keep your current password.
+          </p>
+        </section>
+
+        <section className="space-y-4 pt-2 border-t border-ink-600/40">
+          <h4 className="text-xs uppercase tracking-wider text-slate-400 font-semibold pt-4">
+            Security question
+          </h4>
+          {user.secretQuestion && (
+            <p className="text-[11px] text-slate-500 -mt-2">
+              Currently: {user.secretQuestion}
+            </p>
+          )}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[11px] uppercase tracking-wider text-slate-400 mb-1.5">
+                Question
+              </label>
+              <SelectMenu
+                value={newSecretQuestion}
+                onChange={setNewSecretQuestion}
+                options={SECRET_QUESTIONS.map((q) => ({ value: q, label: q }))}
+                testId="new-secret-question"
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="new-secret-answer"
+                className="block text-[11px] uppercase tracking-wider text-slate-400 mb-1.5"
+              >
+                New answer
+              </label>
+              <input
+                id="new-secret-answer"
+                type="text"
+                value={newSecretAnswer}
+                onChange={(e) => setNewSecretAnswer(e.target.value)}
+                placeholder="e.g. Poutine"
+                autoComplete="off"
+                data-testid="new-secret-answer"
+                className="w-full h-11 px-3 rounded-xl bg-ink-800/60 border border-ink-600 text-sm text-slate-100 placeholder:text-slate-500 outline-none focus:border-sky/60"
+              />
+            </div>
+          </div>
+          <p className="text-[11px] text-slate-500">
+            Leave the answer blank to keep your current question. Capitals and
+            extra spaces are ignored when you sign in.
+          </p>
+        </section>
+
+        {/* Re-authentication. A valid session is not on its own enough to
+            replace the credential that grants the next one. */}
+        <section className="space-y-4 pt-2 border-t border-ink-600/40">
+          <h4 className="text-xs uppercase tracking-wider text-slate-400 font-semibold pt-4 inline-flex items-center gap-2">
+            <ShieldCheck className="w-3.5 h-3.5 text-sky" />
+            Confirm it is you
+          </h4>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <PasswordField
+              id="current-password"
+              label="Current password"
+              value={currentPassword}
+              onChange={setCurrentPassword}
+              placeholder="Your password today"
+              autoComplete="current-password"
+            />
+            <div>
+              <label
+                htmlFor="current-secret-answer"
+                className="block text-[11px] uppercase tracking-wider text-slate-400 mb-1.5"
+              >
+                Current secret code
+              </label>
+              <input
+                id="current-secret-answer"
+                type="text"
+                value={currentSecretAnswer}
+                onChange={(e) => setCurrentSecretAnswer(e.target.value)}
+                placeholder={user.secretQuestion || 'Your secret answer'}
+                autoComplete="off"
+                data-testid="current-secret-answer"
+                className="w-full h-11 px-3 rounded-xl bg-ink-800/60 border border-ink-600 text-sm text-slate-100 placeholder:text-slate-500 outline-none focus:border-sky/60"
+              />
+            </div>
+          </div>
+        </section>
+
+        <div className="flex justify-end pt-1">
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving}
+            data-testid="save-credentials-btn"
+            className="btn-sky h-11 px-6 disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {saving ? 'Saving…' : 'Save changes'}
+          </button>
+        </div>
+      </div>
+    </ChartCard>
+  );
 }
 
 /* --------------------------- Profile (all roles) -------------------------- */
@@ -393,48 +638,17 @@ function ClientScaleSettingsTab({ user }) {
 function ManageScalesTab() {
   const navigate = useNavigate();
   const [scales, setScales] = useState([]);
-  const [clientUsers, setClientUsers] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const reload = () => {
     setLoading(true);
-    Promise.allSettled([getScales(), getUsers()]).then(([scalesRes, usersRes]) => {
-      setScales(scalesRes.status === 'fulfilled' ? scalesRes.value : []);
-      // Same distinction as Scale Management: a failed load and an empty
-      // directory both leave the assignment dropdown with only "Unassigned",
-      // and they need different responses from whoever is looking at it.
-      if (usersRes.status === 'fulfilled') {
-        setClientUsers((usersRes.value || []).filter((u) => u.role === 'client'));
-        setUsersError(null);
-      } else {
-        setClientUsers([]);
-        setUsersError(
-          usersRes.reason?.response?.data?.message ||
-            usersRes.reason?.message ||
-            'Could not load users'
-        );
-      }
-      setLoading(false);
-    });
+    getScales()
+      .then((rows) => setScales(rows || []))
+      .catch(() => setScales([]))
+      .finally(() => setLoading(false));
   };
 
   useEffect(reload, []);
-
-  // Assign by user email; the API derives the organization from that account.
-  const handleAssign = async (scale, assignedEmail) => {
-    if (assignedEmail === (scale.assignedEmail || '')) return;
-    try {
-      const updated = await updateScale(scale.id, { assignedEmail });
-      toast.success(
-        assignedEmail
-          ? `${scale.name} assigned to ${updated.organization || assignedEmail}`
-          : `${scale.name} unassigned`
-      );
-      reload();
-    } catch (err) {
-      toast.error(err?.response?.data?.message || 'Could not reassign scale');
-    }
-  };
 
   const columns = [
     {
@@ -462,22 +676,29 @@ function ManageScalesTab() {
     {
       key: 'assignedEmail',
       label: 'Assigned To',
-      render: (r) => (
-        <div className="min-w-[220px]">
-          <SelectMenu
-            value={r.assignedEmail || ''}
-            onChange={(v) => handleAssign(r, v)}
-            options={[
-              { value: '', label: '— Unassigned —' },
-              ...clientUsers.map((u) => ({ value: u.email, label: u.email })),
-            ]}
-            testId={`assign-select-${r.id}`}
-          />
-          {r.organization && (
-            <div className="text-[10px] text-slate-500 mt-1 truncate">{r.organization}</div>
-          )}
-        </div>
-      ),
+      // Read-only. A scale can have any number of assignees, and the
+      // single-select that used to live here sent the whole list as one value
+      // — quietly dropping everyone else on a shared scale. Changing who has
+      // access is done in Scale Management, which has the full checklist.
+      render: (r) => {
+        const people = r.assignedEmails || (r.assignedEmail ? [r.assignedEmail] : []);
+        if (people.length === 0) {
+          return <span className="text-slate-500 italic">Unassigned</span>;
+        }
+        return (
+          <div className="min-w-[220px] leading-tight" data-testid={`assignees-${r.id}`}>
+            {people.slice(0, 2).map((e) => (
+              <div key={e} className="text-sm text-slate-300 truncate">{e}</div>
+            ))}
+            {people.length > 2 && (
+              <div className="text-[11px] text-sky">+{people.length - 2} more</div>
+            )}
+            {r.organization && people.length <= 2 && (
+              <div className="text-[10px] text-slate-500 truncate">{r.organization}</div>
+            )}
+          </div>
+        );
+      },
     },
   ];
 
@@ -523,10 +744,12 @@ export default function Settings() {
   const TABS = isAdmin
     ? [
         { key: 'profile', label: 'Profile', Icon: User },
+        { key: 'security', label: 'Password & Security', Icon: ShieldCheck },
         { key: 'manageScales', label: 'Manage Scales', Icon: ScaleIcon },
       ]
     : [
         { key: 'profile', label: 'Profile', Icon: User },
+        { key: 'security', label: 'Password & Security', Icon: ShieldCheck },
         { key: 'scaleSettings', label: 'Scale Settings', Icon: ScaleIcon },
       ];
 
@@ -572,6 +795,7 @@ export default function Settings() {
       </div>
 
       {tab === 'profile' && <ProfileTab user={user} />}
+      {tab === 'security' && <SecurityTab user={user} />}
       {tab === 'scaleSettings' && !isAdmin && <ClientScaleSettingsTab user={user} />}
       {tab === 'manageScales' && isAdmin && <ManageScalesTab />}
     </div>

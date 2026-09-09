@@ -24,7 +24,7 @@ AUTHORIZATION MODEL
 -------------------
 Two rules do the heavy lifting:
 
-1. Clients only ever see their own organization's scales. Scoping happens
+1. Clients only ever see scales assigned to them. Scoping happens
    server-side from the JWT's `org` claim — never from anything the client
    sends, so a crafted request can't widen the scope.
 2. Clients can only edit `location` and `mealSchedule`, and only on scales
@@ -79,8 +79,8 @@ TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")  # 24h HH:MM
 # they are the ones who know whether a site is Atlantic or Eastern.
 CLIENT_EDITABLE_FIELDS = {"location", "mealSchedule", "timeZone"}
 ADMIN_EDITABLE_FIELDS = {
-    "name", "assignedEmail", "organization", "location", "status", "serial",
-    "notes", "mealSchedule", "timeZone",
+    "name", "assignedEmail", "assignedEmails", "organization", "location",
+    "status", "serial", "notes", "mealSchedule", "timeZone",
 }
 
 
@@ -155,7 +155,11 @@ def parse_request(event):
         body = json.loads(raw_body) if raw_body.strip() else {}
     except json.JSONDecodeError:
         body = None
-    return method, path, body
+
+    # Function URLs and API Gateway both put the query string here; a request
+    # with none at all yields null rather than {}, hence the `or {}`.
+    params = event.get("queryStringParameters") or {}
+    return method, path, body, params
 
 
 def bearer_token(event) -> str:
@@ -212,14 +216,74 @@ def validate_time_zone(value):
     return None, f"'{tz}' is not a valid IANA time zone (e.g. America/Halifax)"
 
 
+def scale_assignees(item: dict) -> list:
+    """
+    The emails a scale is assigned to, from either storage shape.
+
+    `assignedEmails` is the list written since scales became shareable;
+    `assignedEmail` is the single string every earlier row still holds. Reading
+    through one helper means no migration is required — an old row keeps
+    working and is rewritten into the new shape the next time it is saved.
+    """
+    emails = item.get("assignedEmails")
+    if isinstance(emails, (list, set, tuple)):
+        return [str(e).strip().lower() for e in emails if str(e).strip()]
+    single = (item.get("assignedEmail") or "").strip().lower()
+    return [single] if single else []
+
+
+def resolve_assignments(raw):
+    """
+    Normalises the requested assignees into (emails, organization, error).
+
+    Accepts a list, or a single string for callers still sending one. Every
+    address must belong to a real account: silently dropping an unknown one
+    would look like a successful share that grants nobody anything.
+
+    `organization` is taken from the first assignee. With several owners it is
+    no longer a meaningful access boundary — it is kept only as the label the
+    tables group by.
+    """
+    if raw is None:
+        raw = []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return None, None, "Assignees must be a list of email addresses"
+
+    seen = []
+    for entry in raw:
+        email = str(entry or "").strip().lower()
+        if email and email not in seen:
+            seen.append(email)
+
+    if not seen:
+        return [], "", None
+
+    organization = ""
+    for email in seen:
+        try:
+            user = _users.get_item(Key={"email": email}).get("Item")
+        except ClientError as err:
+            print(f"ERROR resolve_assignments: {err}")
+            return None, None, "Could not look up that user"
+        if not user:
+            return None, None, f"No user account found for {email}"
+        if not organization:
+            organization = user.get("organization", "")
+
+    return seen, organization, None
+
+
 def resolve_assignment(email: str):
     """
     Turns an assigned user's email into (assignedEmail, organization, error).
 
-    A scale is assigned to a *person* the admin picks by email, but visibility
-    is scoped by that person's ORGANIZATION so their colleagues at the same
-    kitchen also see it. Deriving the org here — rather than trusting one sent
-    by the caller — keeps the two fields from drifting apart.
+    A scale is assigned to a *person*, and that assignment is what grants
+    access — one scale, one account. The organization is still derived from
+    that user and stored alongside, so the UI can group and label by site, but
+    it no longer decides who can see anything. Deriving it here rather than
+    trusting a caller-supplied value keeps the two fields from drifting apart.
 
     An empty email means "unassigned", which is valid: scales are provisioned
     and shipped before anyone owns them.
@@ -251,10 +315,11 @@ def build_update(fields: dict):
 # Scales
 # ==========================================================================
 
-def list_scales(claims):
+def list_scales(claims, params=None):
     """
     Admins see the whole fleet — including devices that are emitting telemetry
-    but were never provisioned here. Clients see only their organization's.
+    but were never provisioned here. Clients see only the scales assigned to
+    them.
 
     Merging in unregistered UIDs is the point: a scale sending data that nobody
     has set up is exactly what an operator needs to see, and it can't be
@@ -266,10 +331,13 @@ def list_scales(claims):
         if is_admin:
             result = _scales.scan()
         else:
+            email = (claims.get("email") or "").strip().lower()
             result = _scales.scan(
-                FilterExpression="#org = :org",
-                ExpressionAttributeNames={"#org": "organization"},
-                ExpressionAttributeValues={":org": claims.get("org", "")},
+                FilterExpression="contains(#ae, :e) OR #a = :e",
+                ExpressionAttributeNames={
+                    "#ae": "assignedEmails", "#a": "assignedEmail",
+                },
+                ExpressionAttributeValues={":e": email},
             )
     except ClientError as err:
         print(f"ERROR list_scales: {err}")
@@ -279,7 +347,8 @@ def list_scales(claims):
 
     if is_admin:
         known = {s["scaleId"] for s in items}
-        for uid in discover_reading_uids():
+        fresh = str((params or {}).get("refresh") or "").strip().lower() in ("1", "true", "yes")
+        for uid in discover_reading_uids(force=fresh):
             if uid not in known:
                 items.append(unregistered_scale(uid))
 
@@ -287,7 +356,7 @@ def list_scales(claims):
     return respond(200, items)
 
 
-def discover_reading_uids():
+def discover_reading_uids(force: bool = False):
     """
     Every UID that has actually reported telemetry.
 
@@ -295,9 +364,14 @@ def discover_reading_uids():
     table. Returns [] on any failure — if the readings table isn't reachable
     (no IAM grant, wrong name) the scales list still works, just without the
     unregistered extras. Degrading quietly beats a broken page.
+
+    `force` skips the cache. The readings Lambda owns the purge that empties a
+    UID, and it cannot reach into this function's memory — so after a purge the
+    list here would keep naming a device with no rows left for up to
+    UID_CACHE_TTL. The client asks for a fresh read instead of waiting it out.
     """
     now = time.time()
-    if _uid_cache["uids"] is not None and now - _uid_cache["at"] < UID_CACHE_TTL:
+    if not force and _uid_cache["uids"] is not None and now - _uid_cache["at"] < UID_CACHE_TTL:
         return _uid_cache["uids"]
 
     uids, kwargs = set(), {
@@ -349,7 +423,11 @@ def public_scale(item: dict) -> dict:
         "id": item.get("scaleId"),
         "scaleId": item.get("scaleId"),
         "name": item.get("name", ""),
-        "assignedEmail": item.get("assignedEmail", ""),
+        # Both shapes go out: `assignedEmails` is the truth, `assignedEmail`
+        # is kept populated with the first of them so nothing reading the old
+        # field breaks mid-rollout.
+        "assignedEmails": scale_assignees(item),
+        "assignedEmail": (scale_assignees(item) or [""])[0],
         "organization": item.get("organization", ""),
         "location": item.get("location", ""),
         "timeZone": item.get("timeZone", ""),
@@ -394,18 +472,22 @@ def create_scale(claims, body):
     if err:
         return respond(400, {"message": err})
 
-    # The org is derived from the assigned user, never taken from the request.
-    assigned_email, organization, err = resolve_assignment(body.get("assignedEmail"))
+    # The org is derived from the assigned users, never taken from the request.
+    assigned_emails, organization, err = resolve_assignments(
+        body.get("assignedEmails", body.get("assignedEmail"))
+    )
     if err:
         return respond(400, {"message": err})
-    # Allow provisioning against a bare org name when no user is picked yet.
-    if not assigned_email and body.get("organization"):
+    # Allow provisioning against a bare org name when nobody is picked yet.
+    if not assigned_emails and body.get("organization"):
         organization = (body.get("organization") or "").strip()
 
     item = {
         "scaleId": scale_id,
         "name": name,
-        "assignedEmail": assigned_email,
+        "assignedEmails": assigned_emails,
+        # Mirrored so a Lambda still running the previous build can read it.
+        "assignedEmail": (assigned_emails or [""])[0],
         "organization": organization,
         "location": (body.get("location") or "").strip(),
         "timeZone": time_zone,
@@ -423,7 +505,19 @@ def create_scale(claims, body):
         _scales.put_item(Item=item, ConditionExpression="attribute_not_exists(scaleId)")
     except ClientError as err:
         if err.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            return respond(409, {"message": f"Scale {scale_id} already exists"})
+            # Reached most often by an admin trying to allot an existing
+            # scale to another person by adding it a second time. Saying so is
+            # the difference between a dead end and a next step.
+            return respond(
+                409,
+                {
+                    "message": (
+                        f"{scale_id} is already registered. To share it with "
+                        "more people, open it from the list and add them under "
+                        "Assign To."
+                    )
+                },
+            )
         print(f"ERROR create_scale: {err}")
         return respond(503, {"message": "Could not create scale"})
 
@@ -443,9 +537,11 @@ def update_scale(claims, scale_id, body):
 
     is_admin = claims["role"] == "admin"
 
-    # Clients may only touch scales their own organization owns.
-    if not is_admin and existing.get("organization") != claims.get("org"):
-        return respond(403, {"message": "This scale is not assigned to your organization"})
+    # Clients may only touch scales they are an assignee of.
+    if not is_admin and (claims.get("email") or "").strip().lower() not in scale_assignees(
+        existing
+    ):
+        return respond(403, {"message": "This scale is not assigned to you"})
 
     allowed = ADMIN_EDITABLE_FIELDS if is_admin else CLIENT_EDITABLE_FIELDS
     rejected = [k for k in body if k not in allowed and k not in ("id", "scaleId")]
@@ -460,18 +556,21 @@ def update_scale(claims, scale_id, body):
     # Reassignment: setting assignedEmail also rewrites organization, so the
     # two can never drift. Handled before the generic loop because it writes
     # two fields from one input.
-    if is_admin and "assignedEmail" in body:
-        assigned_email, organization, err = resolve_assignment(body["assignedEmail"])
+    if is_admin and ("assignedEmails" in body or "assignedEmail" in body):
+        assigned_emails, organization, err = resolve_assignments(
+            body.get("assignedEmails", body.get("assignedEmail"))
+        )
         if err:
             return respond(400, {"message": err})
-        updates["assignedEmail"] = assigned_email
+        updates["assignedEmails"] = assigned_emails
+        updates["assignedEmail"] = (assigned_emails or [""])[0]
         updates["organization"] = organization
 
     for field in allowed:
-        if field not in body or field == "assignedEmail":
+        if field not in body or field in ("assignedEmail", "assignedEmails"):
             continue
-        # An explicit assignedEmail wins over any organization sent alongside it.
-        if field == "organization" and "assignedEmail" in updates:
+        # An explicit assignment wins over any organization sent alongside it.
+        if field == "organization" and "assignedEmails" in updates:
             continue
         value = body[field]
 
@@ -707,7 +806,7 @@ RE_USER_ID = re.compile(r"/users/([^/]+)/?$")
 RE_ME = re.compile(r"/me/?$")
 
 
-def dispatch(method, path, claims, body):
+def dispatch(method, path, claims, body, params=None):
     if RE_ME.search(path):
         if method == "GET":
             return get_me(claims)
@@ -716,7 +815,7 @@ def dispatch(method, path, claims, body):
 
     if RE_SCALES.search(path):
         if method == "GET":
-            return list_scales(claims)
+            return list_scales(claims, params or {})
         if method == "POST":
             return create_scale(claims, body)
 
@@ -748,7 +847,7 @@ def lambda_handler(event, context):
         print("FATAL: JWT_SECRET environment variable is not set")
         return respond(500, {"message": "Server is not configured correctly"})
 
-    method, path, body = parse_request(event)
+    method, path, body, params = parse_request(event)
 
     if method == "OPTIONS":
         return respond(204)
@@ -762,7 +861,7 @@ def lambda_handler(event, context):
     claims["role"] = (claims.get("role") or "client").strip().lower()
 
     try:
-        return dispatch(method, path, claims, body)
+        return dispatch(method, path, claims, body, params)
     except Exception as err:  # noqa: BLE001 — last line of defence
         print(f"ERROR handling {method} {path}: {type(err).__name__}: {err}")
         return respond(500, {"message": "Something went wrong. Please try again."})

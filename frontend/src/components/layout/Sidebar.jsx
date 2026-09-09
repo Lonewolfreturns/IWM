@@ -11,6 +11,8 @@ import {
   Terminal,
   LogOut,
   Globe,
+  SlidersHorizontal,
+  ExternalLink,
   X,
 } from 'lucide-react';
 import { getCurrentUser, logout } from '../../services/auth';
@@ -26,6 +28,14 @@ const CLIENT_LINKS = [
   { to: '/dashboard', label: 'Dashboard', Icon: LayoutDashboard },
   { to: '/analytics', label: 'Analytics', Icon: BarChart3 },
   { to: '/reports', label: 'Reports', Icon: FileText },
+  // An external tool, not a route in this app. `href` rather than `to` is what
+  // NavSection keys off to render an anchor instead of a NavLink — a router
+  // link to an absolute URL would be treated as a path and 404 in the SPA.
+  {
+    href: 'https://iwmsmartscale.base44.app',
+    label: 'Configure Scales',
+    Icon: SlidersHorizontal,
+  },
   { to: '/settings', label: 'Settings', Icon: SettingsIcon },
 ];
 
@@ -71,20 +81,48 @@ function NavSection({ title, links, onNavigate }) {
       <ul className="flex flex-col gap-1">
         {links.map((link) => {
           const { Icon } = link;
+          const testId = `nav-${link.label.toLowerCase().replace(/\s+/g, '-')}`;
+          const base = [
+            'group flex items-center gap-3 rounded-lg px-3 py-2.5',
+            'min-h-[44px] text-sm font-medium transition-all',
+            'text-slate-400 hover:text-white hover:bg-ink-700/50',
+          ].join(' ');
+
+          // Anything with `href` leaves the app entirely.
+          if (link.href) {
+            return (
+              <li key={link.label}>
+                <a
+                  href={link.href}
+                  target="_blank"
+                  // noopener is the one that matters: without it the opened
+                  // page gets a handle on window.opener and can navigate this
+                  // tab somewhere else.
+                  rel="noopener noreferrer"
+                  onClick={handleClick}
+                  data-testid={testId}
+                  className={base}
+                  title={`${link.label} — opens ${new URL(link.href).hostname} in a new tab`}
+                >
+                  <Icon className="w-[18px] h-[18px] shrink-0" />
+                  <span className="lg:inline hidden flex-1">{link.label}</span>
+                  {/* Marks it as a departure, so nobody expects the back
+                      button to return them here. */}
+                  <ExternalLink className="w-3.5 h-3.5 shrink-0 opacity-50 lg:inline hidden" />
+                </a>
+              </li>
+            );
+          }
+
           return (
             <li key={link.label}>
               <NavLink
                 to={link.to}
                 end={false}
                 onClick={handleClick}
-                data-testid={`nav-${link.label.toLowerCase().replace(/\s+/g, '-')}`}
+                data-testid={testId}
                 className={({ isActive }) =>
-                  [
-                    'group flex items-center gap-3 rounded-lg px-3 py-2.5',
-                    'min-h-[44px] text-sm font-medium transition-all',
-                    'text-slate-400 hover:text-white hover:bg-ink-700/50',
-                    isActive ? 'nav-active' : '',
-                  ].join(' ')
+                  [base, isActive ? 'nav-active' : ''].join(' ')
                 }
               >
                 <Icon className="w-[18px] h-[18px] shrink-0" />
@@ -195,7 +233,11 @@ export default function Sidebar({ mobileOpen, onClose }) {
   const handleLogout = () => {
     logout();
     toast.success('Logged out successfully');
-    navigate('/login', { replace: true });
+    // Home, not the sign-in form. Signing out is a decision to stop using the
+    // app, and dropping straight onto a login box reads as "you got signed
+    // out, sign back in" rather than "you left". The landing page also gives
+    // somewhere to go that isn't typing a password again.
+    navigate('/', { replace: true });
   };
 
   return (

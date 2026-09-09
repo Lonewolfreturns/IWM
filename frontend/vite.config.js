@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import esToolkitEsm from './vite-plugin-es-toolkit-esm.js';
 import basicSsl from '@vitejs/plugin-basic-ssl';
 import path from 'path';
 
@@ -24,7 +25,7 @@ import path from 'path';
 const useHttps = process.env.VITE_DEV_HTTPS === 'true';
 
 export default defineConfig({
-  plugins: [react(), ...(useHttps ? [basicSsl()] : [])],
+  plugins: [esToolkitEsm(), react(), ...(useHttps ? [basicSsl()] : [])],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

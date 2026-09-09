@@ -22,7 +22,11 @@ export default function Navbar({ title, onMenuClick }) {
   const handleLogout = () => {
     logout();
     toast.success('Logged out successfully');
-    navigate('/login', { replace: true });
+    // Home, not the sign-in form. Signing out is a decision to stop using the
+    // app, and dropping straight onto a login box reads as "you got signed
+    // out, sign back in" rather than "you left". The landing page also gives
+    // somewhere to go that isn't typing a password again.
+    navigate('/', { replace: true });
   };
 
   return (

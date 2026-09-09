@@ -56,7 +56,7 @@ SCOPING
 * Admins see EVERY UID present in the readings table, including devices never
   registered in iwm-scales. A scale emitting data that nobody provisioned is
   exactly what an operator needs to notice; filtering it out would hide it.
-* Clients see only UIDs whose scale record is assigned to their organization,
+* Clients see only UIDs whose scale record is assigned to them,
   taken from their signed token — never from the request.
 
 --------------------------------------------------------------------------
@@ -86,6 +86,7 @@ Every threshold is env-tunable; see below.
 ENVIRONMENT VARIABLES
 --------------------------------------------------------------------------
     READINGS_TABLE   default: IWM
+    PURGE_MAX_ROWS   safety cap on one purge call   default: 50000
     SCALES_TABLE     default: iwm-scales
     JWT_SECRET       REQUIRED — identical to the auth Lambda's
     ALLOWED_ORIGIN   default: *
@@ -113,6 +114,17 @@ from botocore.exceptions import ClientError
 from zoneinfo import ZoneInfo
 
 READINGS_TABLE = os.environ.get("READINGS_TABLE", "IWM")
+
+# Rows one invocation will delete before handing control back.
+#
+# NOT a limit on how much can be purged. Deleting is ~25 rows per write
+# request, so a device with 200k readings cannot finish inside a Lambda
+# timeout however long the timeout is. Rather than fail half-way with no
+# record of where it got to, an invocation stops at this many, reports
+# `complete: false`, and the caller immediately calls again — the client loops
+# until it comes back complete. Every row deleted stays deleted, so resuming
+# costs nothing.
+PURGE_MAX_ROWS = int(os.environ.get("PURGE_MAX_ROWS", "5000"))
 SCALES_TABLE = os.environ.get("SCALES_TABLE", "iwm-scales")
 JWT_SECRET = os.environ.get("JWT_SECRET", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "*")
@@ -282,7 +294,11 @@ class DecimalEncoder(json.JSONEncoder):
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    # DELETE is here for the purge route only. A browser preflights any
+    # non-simple method, and a method missing from this list is refused before
+    # the request ever reaches the function — which surfaces to the client as a
+    # network error with no response body, not as a 405.
+    "Access-Control-Allow-Methods": "GET, DELETE, OPTIONS",
     "Access-Control-Max-Age": "86400",
 }
 
@@ -405,20 +421,34 @@ def discover_uids():
     return _uid_cache["uids"]
 
 
-def org_uids(org: str):
-    """UIDs whose scale record is assigned to this organization."""
-    if not org:
+# ---------------------------------------------------------------------------
+# ACCESS SCOPE: per assigned user, not per organization.
+#
+# A scale is visible to the one account it is assigned to. It used to be scoped
+# by that person's ORGANIZATION, so every colleague sharing an `organization`
+# string saw the whole site's scales — which made "assign to a person" and
+# "share with a company" the same act, and meant a typo'd organization on a
+# user record silently widened or narrowed what they could see.
+#
+# `organization` is still stored on both records and still shown in the UI. It
+# is a label now, not a permission.
+# ---------------------------------------------------------------------------
+
+def assigned_uids(email: str):
+    """UIDs of every scale this user is an assignee of."""
+    email = (email or "").strip().lower()
+    if not email:
         return []
     try:
         result = _scales.scan(
-            FilterExpression="#o = :o",
-            ExpressionAttributeNames={"#o": "organization"},
-            ExpressionAttributeValues={":o": org},
+            FilterExpression="contains(#ae, :e) OR #a = :e",
+            ExpressionAttributeNames={"#ae": "assignedEmails", "#a": "assignedEmail"},
+            ExpressionAttributeValues={":e": email},
             ProjectionExpression="scaleId",
         )
         return [i["scaleId"] for i in result.get("Items", []) if i.get("scaleId")]
     except ClientError as err:
-        print(f"ERROR org_uids: {err}")
+        print(f"ERROR assigned_uids: {err}")
         return []
 
 
@@ -593,7 +623,7 @@ def fetch_live(claims, params):
         seconds = LIVE_WINDOW_SECONDS
 
     try:
-        scoped = discover_uids() if is_admin else org_uids(claims.get("org", ""))
+        scoped = discover_uids() if is_admin else assigned_uids(claims.get("email", ""))
         if not scoped:
             return [], None
 
@@ -621,6 +651,30 @@ def fetch_live(claims, params):
     return readings, None
 
 
+def resolve_uid(wanted: str, allowed):
+    """
+    Matches a requested UID against the ones this caller may read, ignoring case.
+
+    UIDs are whatever the device was provisioned with, and this fleet is not
+    consistent about it: DAL00003 and GUELPH01 sit alongside Scotttest4,
+    ScottTest, "Community Day" and Test. The request used to be upper-cased
+    before the membership test, so "Scotttest4" became "SCOTTTEST4", matched
+    nothing, and came back 403 "not assigned to you" — for eight of eighteen
+    scales, to an admin who could see every one of them in the list.
+
+    Returns the UID in its stored spelling, because DynamoDB partition keys are
+    case-sensitive: matching loosely is only safe if the query then uses the
+    exact stored form. None means no such UID is readable by this caller.
+    """
+    if not wanted:
+        return None
+    target = wanted.strip().lower()
+    for uid in allowed:
+        if str(uid).strip().lower() == target:
+            return str(uid)
+    return None
+
+
 def fetch_readings(claims, params):
     """
     Returns (readings, error_response).
@@ -630,20 +684,21 @@ def fetch_readings(claims, params):
     useful than one showing an empty state because ingestion paused.
     """
     is_admin = claims["role"] == "admin"
-    wanted_uid = (params.get("uid") or "").strip().upper()
+    wanted_uid = (params.get("uid") or "").strip()
 
     try:
         if is_admin:
             scoped = discover_uids()
         else:
-            scoped = org_uids(claims.get("org", ""))
+            scoped = assigned_uids(claims.get("email", ""))
 
         if wanted_uid:
-            if wanted_uid not in scoped:
+            match = resolve_uid(wanted_uid, scoped)
+            if not match:
                 return None, respond(
-                    403, {"message": "That scale is not assigned to your organization"}
+                    403, {"message": "That scale is not assigned to you"}
                 )
-            scoped = [wanted_uid]
+            scoped = [match]
 
         if not scoped:
             return [], None
@@ -683,6 +738,142 @@ def fetch_readings(claims, params):
 # ==========================================================================
 # Alert engine
 # ==========================================================================
+
+def purge_readings(claims, uid: str):
+    """
+    Permanently deletes every reading for one UID.
+
+    Admin only, and irreversible — DynamoDB has no undo, and these rows are the
+    only copy. Guarded accordingly:
+
+      * admin role is re-checked here, not merely in the UI
+      * the UID must resolve against UIDs that actually exist, so a typo
+        deletes nothing rather than silently "succeeding" on an empty set
+      * a row count is returned so the caller can confirm what went, and the
+        confirmation dialog can show the number before anyone commits
+
+    Intended for clearing test devices out of a real table. The scale record in
+    iwm-scales is left alone: this removes telemetry, not the provisioning, so
+    a scale that is still deployed keeps its configuration and simply starts
+    from an empty history.
+    """
+    if claims["role"] != "admin":
+        return None, respond(403, {"message": "Admin access required"})
+
+    wanted = (uid or "").strip()
+    if not wanted:
+        return None, respond(400, {"message": "A scale UID is required"})
+
+    # Resolve against the UIDs actually present, case-insensitively, and use
+    # the stored spelling — partition keys are case-sensitive, so deleting by a
+    # differently-cased string would quietly match nothing.
+    match = resolve_uid(wanted, discover_uids())
+    if not match:
+        return None, respond(404, {"message": f"No readings found for {wanted}"})
+
+    deleted = 0
+    try:
+        kwargs = {
+            "KeyConditionExpression": Key("UID").eq(match),
+            "ProjectionExpression": "#u, #d",
+            "ExpressionAttributeNames": {"#u": "UID", "#d": "DateTime"},
+        }
+        while True:
+            page = _readings.query(**kwargs)
+            items = page.get("Items", [])
+            capped = False
+            if items:
+                # batch_writer batches, retries unprocessed items and dedupes
+                # keys within a batch, which hand-rolled BatchWriteItem loops
+                # routinely get wrong.
+                with _readings.batch_writer() as batch:
+                    for item in items:
+                        # Checked per item, not per page. A page can hold a
+                        # thousand rows, so testing the cap between pages let a
+                        # limit of 100 delete 600 before noticing — which is
+                        # not much of a brake.
+                        if deleted >= PURGE_MAX_ROWS:
+                            capped = True
+                            break
+                        batch.delete_item(
+                            Key={"UID": item["UID"], "DateTime": item["DateTime"]}
+                        )
+                        deleted += 1
+
+            if capped or deleted >= PURGE_MAX_ROWS:
+                # Stop cleanly rather than risk timing out part-way. What has
+                # gone is gone; the caller can run it again to continue.
+                _uid_cache["uids"] = None
+                _uid_cache["at"] = 0
+                print(
+                    f"AUDIT purge_readings uid={match} deleted={deleted} "
+                    f"capped=True by={claims.get('email')}"
+                )
+                return {
+                    "uid": match,
+                    "deleted": deleted,
+                    "complete": False,
+                    "message": (
+                        f"Deleted {deleted} rows so far; more remain. "
+                        "Call again to continue."
+                    ),
+                }, None
+
+            key = page.get("LastEvaluatedKey")
+            if not key:
+                break
+            kwargs["ExclusiveStartKey"] = key
+    except ClientError as err:
+        print(f"ERROR purge_readings {match}: {err}")
+        # Report what was already removed — a partial delete the caller does not
+        # know about is worse than the failure itself.
+        return None, respond(
+            503,
+            {
+                "message": f"Deletion failed after removing {deleted} rows",
+                "deleted": deleted,
+            },
+        )
+
+    # The UID cache still lists a device that no longer has any rows, which
+    # would keep it in every scoped query until the TTL lapses.
+    _uid_cache["uids"] = None
+    _uid_cache["at"] = 0
+
+    print(f"AUDIT purge_readings uid={match} deleted={deleted} by={claims.get('email')}")
+    return {"uid": match, "deleted": deleted, "complete": True}, None
+
+
+def count_readings(claims, uid: str):
+    """
+    How many rows a purge would remove, without removing them.
+
+    Lets the confirmation dialog state a real number instead of "all data",
+    which is the difference between an informed confirmation and a shrug.
+    """
+    if claims["role"] != "admin":
+        return None, respond(403, {"message": "Admin access required"})
+
+    match = resolve_uid((uid or "").strip(), discover_uids())
+    if not match:
+        return {"uid": (uid or "").strip(), "rows": 0}, None
+
+    total = 0
+    try:
+        kwargs = {"KeyConditionExpression": Key("UID").eq(match), "Select": "COUNT"}
+        while True:
+            page = _readings.query(**kwargs)
+            total += page.get("Count", 0)
+            key = page.get("LastEvaluatedKey")
+            if not key:
+                break
+            kwargs["ExclusiveStartKey"] = key
+    except ClientError as err:
+        print(f"ERROR count_readings {match}: {err}")
+        return None, respond(503, {"message": "Could not count readings"})
+
+    return {"uid": match, "rows": total}, None
+
 
 def fetch_alerts(claims, params):
     """
@@ -1051,7 +1242,7 @@ def dashboard_stats(readings, claims):
 
     total_scales = len(uids)
     if claims["role"] != "admin":
-        total_scales = max(total_scales, len(org_uids(claims.get("org", ""))))
+        total_scales = max(total_scales, len(assigned_uids(claims.get("email", ""))))
 
     return {
         "totalWasteToday": round(by_day.get(latest, 0.0), 1),
@@ -1124,13 +1315,21 @@ def lambda_handler(event, context):
 
     if method == "OPTIONS":
         return respond(204)
-    if method != "GET":
-        return respond(405, {"message": "Only GET is supported"})
+    if method not in ("GET", "DELETE"):
+        return respond(405, {"message": "Only GET and DELETE are supported"})
 
     claims = verify_token(bearer_token(event))
     if not claims:
         return respond(401, {"message": "Unauthorized"})
     claims["role"] = (claims.get("role") or "client").strip().lower()
+
+    # DELETE /readings?uid=X — remove every reading for one device.
+    # Routed before anything else so no read path can be reached with DELETE.
+    if method == "DELETE":
+        if not re.search(r"/readings/?$", path):
+            return respond(404, {"message": f"No route for {method} {path}"})
+        result, err = purge_readings(claims, params.get("uid"))
+        return err or respond(200, result)
 
     try:
         # Checked before the general /readings route, which would otherwise
@@ -1158,6 +1357,11 @@ def lambda_handler(event, context):
             except ValueError:
                 limit = MAX_ROWS
             return respond(200, readings[:limit])
+        # Rows a purge would remove. Admin-only, checked in the handler.
+        if re.search(r"/readings/count/?$", path):
+            result, err = count_readings(claims, params.get("uid"))
+            return err or respond(200, result)
+
         if re.search(r"/dashboard/stats/?$", path):
             return respond(200, dashboard_stats(readings, claims))
         if re.search(r"/dashboard/alerts/?$", path):

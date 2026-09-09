@@ -4,8 +4,11 @@ IWM — Auth Lambda (signup + login)
 
 Single Lambda behind a Lambda Function URL, handling:
 
-    POST /auth/signup   -> create a CLIENT account (self-service)
-    POST /auth/login    -> authenticate any account (client or admin)
+    POST /auth/signup      -> create a CLIENT account (self-service)
+    POST /auth/login       -> authenticate any account (client or admin)
+    POST /auth/credentials -> change own password and/or security question
+                              [requires a bearer token AND the current
+                               password + secret answer]
 
 Zero external dependencies: everything below is Python stdlib plus boto3,
 which is preinstalled in the Lambda Python runtime. Paste straight into the
@@ -302,6 +305,129 @@ def handle_signup(body: dict):
     return respond(201, {"token": make_token(item), "user": public_user(item)})
 
 
+def bearer_token(event) -> str:
+    """Pulls the bearer token out of the Authorization header, if present."""
+    headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
+    raw = headers.get("authorization") or ""
+    return raw[7:].strip() if raw.lower().startswith("bearer ") else ""
+
+
+def handle_change_credentials(claims: dict, body: dict):
+    """
+    Changes the caller's own password and/or security question.
+
+    Re-authenticates with the CURRENT password and secret answer even though a
+    valid token was already presented. A token can be a borrowed laptop or a
+    tab left open; the thing being changed here is the credential that would
+    let someone back in afterwards, so possession of the session is not enough
+    on its own.
+
+    Both changes go through one endpoint because both are re-authenticated the
+    same way, and because someone rotating credentials usually wants to do both
+    at once — which should cost one re-auth, not two.
+
+    Nothing is written unless every check passes, so a rejected request can
+    never leave the account with a new password but the old secret answer.
+    """
+    email = (claims.get("email") or "").strip().lower()
+    if not email:
+        return respond(401, {"message": "Unauthorized"})
+
+    current_password = body.get("currentPassword") or ""
+    current_answer = normalize_secret_answer(body.get("currentSecretAnswer"))
+
+    new_password = body.get("newPassword") or ""
+    new_question = (body.get("newSecretQuestion") or "").strip()
+    new_answer_raw = body.get("newSecretAnswer")
+    new_answer = normalize_secret_answer(new_answer_raw)
+
+    wants_password = bool(new_password)
+    # A new question without a new answer would leave the stored answer
+    # attached to a question it no longer answers.
+    wants_secret = bool(new_question or new_answer_raw)
+
+    if not wants_password and not wants_secret:
+        return respond(400, {"message": "Nothing to change"})
+    if not current_password or not current_answer:
+        return respond(
+            400,
+            {"message": "Your current password and secret code are required"},
+        )
+
+    try:
+        item = _table.get_item(Key={"email": email}).get("Item")
+    except ClientError:
+        return respond(503, {"message": "Authentication service unavailable"})
+
+    if not item:
+        return respond(401, {"message": "Unauthorized"})
+    if item.get("status") != "active":
+        return respond(403, {"message": "This account has been deactivated"})
+
+    # One message for both, so a wrong answer cannot be used to confirm that
+    # the password was right.
+    if not verify_credential(
+        current_password, item.get("passwordSalt"), item.get("passwordHash")
+    ) or not verify_credential(
+        current_answer, item.get("secretAnswerSalt"), item.get("secretAnswerHash")
+    ):
+        return respond(401, {"message": "Your current password or secret code is incorrect"})
+
+    sets = {}
+
+    if wants_password:
+        if len(new_password) < MIN_PASSWORD_LENGTH:
+            return respond(
+                400,
+                {"message": f"New password must be at least {MIN_PASSWORD_LENGTH} characters"},
+            )
+        if new_password == current_password:
+            return respond(400, {"message": "The new password matches your current one"})
+        salt, digest = hash_credential(new_password)
+        sets["passwordSalt"] = salt
+        sets["passwordHash"] = digest
+
+    if wants_secret:
+        question = new_question or (item.get("secretQuestion") or "").strip()
+        if not question:
+            return respond(400, {"message": "A security question is required"})
+        if not new_answer:
+            return respond(400, {"message": "A secret answer is required"})
+        salt, digest = hash_credential(new_answer)
+        sets["secretQuestion"] = question
+        sets["secretAnswerSalt"] = salt
+        sets["secretAnswerHash"] = digest
+
+    sets["credentialsUpdatedAt"] = datetime.now(timezone.utc).isoformat()
+
+    try:
+        _table.update_item(
+            Key={"email": email},
+            UpdateExpression="SET " + ", ".join(f"#{k} = :{k}" for k in sets),
+            ExpressionAttributeNames={f"#{k}": k for k in sets},
+            ExpressionAttributeValues={f":{k}": v for k, v in sets.items()},
+        )
+    except ClientError as err:
+        print(f"ERROR change_credentials: {err}")
+        return respond(503, {"message": "Could not save the change"})
+
+    item.update(sets)
+
+    # A fresh token, so the session that just rotated its own credentials is
+    # not left holding one minted against the old ones.
+    return respond(
+        200,
+        {
+            "token": make_token(item),
+            "user": public_user(item),
+            "changed": sorted(
+                set(["password"] if wants_password else [])
+                | set(["secretQuestion"] if wants_secret else [])
+            ),
+        },
+    )
+
+
 def handle_login(body: dict):
     email = (body.get("email") or "").strip().lower()
     password = body.get("password") or ""
@@ -378,6 +504,11 @@ def lambda_handler(event, context):
             return handle_signup(body)
         if method == "POST" and path.endswith("/auth/login"):
             return handle_login(body)
+        if method == "POST" and path.endswith("/auth/credentials"):
+            claims = verify_token(bearer_token(event))
+            if not claims:
+                return respond(401, {"message": "Unauthorized"})
+            return handle_change_credentials(claims, body)
     except Exception as err:  # noqa: BLE001 - last line of defence
         # Log the detail for CloudWatch, return something opaque to the client.
         print(f"ERROR handling {method} {path}: {type(err).__name__}: {err}")
