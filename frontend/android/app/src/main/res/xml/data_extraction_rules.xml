@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Data transfer rules, for Android 12 and above (API 31+).
+
+  Supersedes backup_rules.xml on new devices and splits what used to be one
+  decision into two:
+
+    <cloud-backup>    what may go to Google's servers
+    <device-transfer> what may go straight to a new phone during setup
+
+  Both are closed here. The reasoning is the same as in backup_rules.xml: the
+  session token is encrypted with a key that lives in THIS device's hardware
+  Keystore and is non-exportable by design, so a copy of the ciphertext on
+  another device is unreadable. Signing in again takes seconds and produces a
+  session that actually works.
+
+  `disableIfNoEncryptionCapabilities` is not set, because nothing is being
+  backed up for it to apply to.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="external" path="." />
+        <exclude domain="root" path="." />
+    </cloud-backup>
+
+    <device-transfer>
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="external" path="." />
+        <exclude domain="root" path="." />
+    </device-transfer>
+</data-extraction-rules>

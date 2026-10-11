@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network policy for release builds of the IWM app.
+
+  Everything the app talks to is HTTPS: the five AWS Lambda Function URLs and
+  foodloss.ca. There is no reason for a cleartext socket to ever open, so the
+  platform is told to refuse one rather than trusting that no code asks for it.
+
+  WHY THIS FILE EXISTS WHEN THE DEFAULT IS ALREADY SECURE
+
+  Since Android 9 (API 28) the platform default is already
+  cleartextTrafficPermitted="false", so on paper this is redundant. It is here
+  anyway for three reasons:
+
+    * minSdk is 24, and on API 24 through 27 the default is the opposite.
+      Those releases are a thin slice of installs, but they are exactly the
+      ones where a protocol downgrade attack lands.
+
+    * It is declarative, so a reviewer and an automated scanner can both read
+      the policy without reading the app's networking code. "No explicit
+      network security config" is a standard finding in Play's pre-launch
+      report and in every MobSF run.
+
+    * It makes the decision explicit for whoever next needs to debug against a
+      local server. The debug variant of this file (src/debug/res/xml/) is the
+      supported place to relax it, and it cannot affect what ships.
+
+  User-installed CAs are excluded. Trusting them is what makes an interception
+  proxy work on a device the attacker controls, and nothing here needs one.
+
+  CERTIFICATE PINNING IS DELIBERATELY NOT CONFIGURED
+
+  The endpoints are AWS Lambda Function URLs behind Amazon's own certificate
+  rotation, and a pin set against a certificate we do not control is an outage
+  waiting for a renewal. A bricked app in the field is a worse failure than the
+  MITM it would prevent, given the traffic is already TLS 1.2+ on a
+  publicly-trusted chain. If pinning is wanted later, pin the Amazon Root CA's
+  SPKI rather than the leaf, and ship a backup pin.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

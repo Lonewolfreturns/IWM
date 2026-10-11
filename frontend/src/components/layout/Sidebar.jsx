@@ -16,6 +16,8 @@ import {
   X,
 } from 'lucide-react';
 import { getCurrentUser, logout } from '../../services/auth';
+import { openExternal } from '../../native/openExternal.js';
+import { isNative } from '../../native/platform.js';
 import { toast } from 'sonner';
 import UserAvatar from '../common/UserAvatar.jsx';
 import SelectMenu from '../common/SelectMenu.jsx';
@@ -75,7 +77,7 @@ function NavSection({ title, links, onNavigate }) {
 
   return (
     <div className="px-3 mt-6 first:mt-2">
-      <div className="px-3 mb-2 text-[10px] font-semibold tracking-[0.22em] uppercase text-slate-500 lg:block hidden">
+      <div className="px-3 mb-2 text-[10px] font-semibold tracking-[0.22em] uppercase text-slate-500">
         {title}
       </div>
       <ul className="flex flex-col gap-1">
@@ -90,25 +92,41 @@ function NavSection({ title, links, onNavigate }) {
 
           // Anything with `href` leaves the app entirely.
           if (link.href) {
+            const host = new URL(link.href).hostname;
             return (
               <li key={link.label}>
                 <a
                   href={link.href}
                   target="_blank"
-                  // noopener is the one that matters: without it the opened
-                  // page gets a handle on window.opener and can navigate this
-                  // tab somewhere else.
+                  // noopener is the one that matters on the web: without it the
+                  // opened page gets a handle on window.opener and can
+                  // navigate this tab somewhere else.
                   rel="noopener noreferrer"
-                  onClick={handleClick}
+                  onClick={(e) => {
+                    // In the apps this must not be a plain navigation. A
+                    // Capacitor WebView has no second tab, so target="_blank"
+                    // is ignored and the href replaces the app itself — no
+                    // address bar, no way back. openExternal hands it to a
+                    // Chrome Custom Tab / SFSafariViewController instead.
+                    if (isNative) {
+                      e.preventDefault();
+                      openExternal(link.href);
+                    }
+                    handleClick();
+                  }}
                   data-testid={testId}
                   className={base}
-                  title={`${link.label} — opens ${new URL(link.href).hostname} in a new tab`}
+                  title={
+                    isNative
+                      ? `${link.label} — opens ${host} in a secure in-app browser`
+                      : `${link.label} — opens ${host} in a new tab`
+                  }
                 >
                   <Icon className="w-[18px] h-[18px] shrink-0" />
-                  <span className="lg:inline hidden flex-1">{link.label}</span>
+                  <span className="flex-1">{link.label}</span>
                   {/* Marks it as a departure, so nobody expects the back
                       button to return them here. */}
-                  <ExternalLink className="w-3.5 h-3.5 shrink-0 opacity-50 lg:inline hidden" />
+                  <ExternalLink className="w-3.5 h-3.5 shrink-0 opacity-50" />
                 </a>
               </li>
             );
@@ -126,7 +144,7 @@ function NavSection({ title, links, onNavigate }) {
                 }
               >
                 <Icon className="w-[18px] h-[18px] shrink-0" />
-                <span className="lg:inline hidden">{link.label}</span>
+                <span>{link.label}</span>
               </NavLink>
             </li>
           );
@@ -153,7 +171,7 @@ function TimeZonePicker() {
   ];
 
   return (
-    <div className="px-3 pb-2 mt-auto lg:block hidden">
+    <div className="px-3 pb-2 mt-auto">
       <div className="px-3 mb-1.5 text-[10px] font-semibold tracking-[0.22em] uppercase text-slate-500">
         Display time in
       </div>
@@ -173,7 +191,7 @@ function UserFooter({ user, onLogout }) {
     <div className="px-3 pb-4 mt-auto">
       <div className="flex items-center gap-3 rounded-xl glass p-3">
         <UserAvatar user={user} />
-        <div className="min-w-0 flex-1 lg:block hidden">
+        <div className="min-w-0 flex-1">
           <div className="text-sm font-semibold text-white truncate">
             {user.name}
           </div>
@@ -230,8 +248,12 @@ export default function Sidebar({ mobileOpen, onClose }) {
     role: 'client',
   };
 
-  const handleLogout = () => {
-    logout();
+  const handleLogout = async () => {
+    // Awaited so the token is gone from the Keychain / Keystore before the app
+    // leaves the screen. `clearSession` drops the in-memory copy first, so
+    // every synchronous `isAuthenticated()` on the way out already reads
+    // false — the await is only about the durable copy.
+    await logout();
     toast.success('Logged out successfully');
     // Home, not the sign-in form. Signing out is a decision to stop using the
     // app, and dropping straight onto a login box reads as "you got signed
@@ -246,7 +268,15 @@ export default function Sidebar({ mobileOpen, onClose }) {
       <aside
         data-testid="sidebar-desktop"
         className="hidden md:flex flex-col fixed top-0 left-0 h-screen z-30 glass-strong border-r border-ink-600/50
-                   lg:w-[240px] md:w-[80px] w-0"
+                   md:w-[240px] w-0"
+        // Tablet landscape puts the home indicator along the bottom and, on a
+        // notched device held sideways, the notch down the left. Both overlap
+        // a full-height sidebar.
+        style={{
+          paddingTop: 'var(--safe-top)',
+          paddingBottom: 'var(--safe-bottom)',
+          paddingLeft: 'var(--safe-left)',
+        }}
       >
         <SidebarContent user={user} onLogout={handleLogout} />
       </aside>
@@ -269,6 +299,11 @@ export default function Sidebar({ mobileOpen, onClose }) {
               exit={{ x: -260 }}
               transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
               className="fixed top-0 left-0 z-50 h-screen w-[260px] glass-strong border-r border-ink-600/50 md:hidden"
+              style={{
+                paddingTop: 'var(--safe-top)',
+                paddingBottom: 'var(--safe-bottom)',
+                paddingLeft: 'var(--safe-left)',
+              }}
               data-testid="sidebar-mobile"
             >
               <button

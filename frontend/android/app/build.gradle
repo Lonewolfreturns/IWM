@@ -1,0 +1,182 @@
+apply plugin: 'com.android.application'
+
+/*
+ * Release signing.
+ *
+ * The keystore is never in the repository. Gradle reads it from, in order:
+ *
+ *   1. android/keystore.properties   (local, gitignored — see SETUP-MOBILE.md)
+ *   2. environment variables         (CI: IWM_KEYSTORE_* / see the workflow)
+ *
+ * When neither is present the release build is left unsigned rather than
+ * falling back to the debug key. That is deliberate: an APK signed with the
+ * debug keystore installs and runs perfectly well, so a silent fallback
+ * produces a build that looks shippable, cannot be uploaded to Play, and
+ * cannot ever be upgraded by a correctly-signed one because the signature
+ * differs. Failing loudly at upload time is far cheaper than discovering it
+ * after a release.
+ */
+def keystorePropsFile = rootProject.file('keystore.properties')
+def keystoreProps = new Properties()
+if (keystorePropsFile.exists()) {
+    keystoreProps.load(new FileInputStream(keystorePropsFile))
+}
+
+def ksPath = keystoreProps['storeFile'] ?: System.getenv('IWM_KEYSTORE_PATH')
+def ksPassword = keystoreProps['storePassword'] ?: System.getenv('IWM_KEYSTORE_PASSWORD')
+def ksAlias = keystoreProps['keyAlias'] ?: System.getenv('IWM_KEY_ALIAS')
+def ksAliasPassword = keystoreProps['keyPassword'] ?: System.getenv('IWM_KEY_PASSWORD')
+def hasSigningConfig = ksPath != null && file(ksPath).exists()
+
+android {
+    namespace = "ca.foodloss.iwm"
+    compileSdk = rootProject.ext.compileSdkVersion
+
+    defaultConfig {
+        applicationId "ca.foodloss.iwm"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+
+        // Bumped on every Play upload — Play rejects a versionCode it has
+        // already seen. CI overrides it with the run number; see the workflow.
+        versionCode project.hasProperty('iwmVersionCode') ? iwmVersionCode.toInteger() : 1
+        versionName project.hasProperty('iwmVersionName') ? iwmVersionName : "1.0.0"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        // Every string the app shows comes from the web bundle, so there are no
+        // Android string resources to localise. Declaring English explicitly
+        // keeps the resource shrinker from guessing and keeps the Play listing
+        // honest about what is supported.
+        resConfigs "en"
+
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+
+    signingConfigs {
+        if (hasSigningConfig) {
+            release {
+                storeFile file(ksPath)
+                storePassword ksPassword
+                keyAlias ksAlias
+                keyPassword ksAliasPassword
+
+                // Both schemes. V2 is what modern Android verifies; V1 is still
+                // required for API < 24 — not reachable at minSdk 24, but
+                // harmless and it keeps older verification tooling happy.
+                enableV1Signing true
+                enableV2Signing true
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (hasSigningConfig) {
+                signingConfig signingConfigs.release
+            } else {
+                println 'IWM: no keystore found — release build will be UNSIGNED. See aws/SETUP-MOBILE.md.'
+            }
+
+            /*
+             * minifyEnabled is OFF, and that is a considered choice rather than
+             * an oversight.
+             *
+             * Neither store requires obfuscation; it is defence in depth, and
+             * for this app the depth it adds is slight — the entire application
+             * logic is JavaScript in assets/public, which R8 does not touch.
+             * What it would shrink is the thin Java shell.
+             *
+             * Against that, R8 and Capacitor interact badly by default: plugins
+             * are discovered by reflection over annotations, so a plugin class
+             * stripped as "unused" fails at runtime, not at build time, and only
+             * on the screen that calls it. proguard-rules.pro already carries
+             * the keep rules that make it safe.
+             *
+             * To turn it on: flip both flags below, then exercise sign-in, a
+             * report export, the external Configure Scales link and the Android
+             * back button on a real device. Those are the four paths that go
+             * through reflected plugin code.
+             */
+            minifyEnabled false
+            shrinkResources false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+
+            // Strips the WebView's remote debugging bridge from the shipped
+            // build. capacitor.config.json also sets this, but the Gradle flag
+            // is what a manifest/APK scanner reads, and "debuggable WebView in
+            // release" is a standard pentest finding.
+            debuggable false
+        }
+
+        debug {
+            // Keeps debug and release installable side by side on one device,
+            // so a tester can compare them without uninstalling.
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+        }
+    }
+
+    bundle {
+        // Play delivers only the density and language slices a given device
+        // needs. The web assets are in assets/, which is never split, so the
+        // saving is modest — but abi splitting does matter: Capacitor pulls in
+        // native libraries through its plugins.
+        language { enableSplit = true }
+        density { enableSplit = true }
+        abi { enableSplit = true }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+
+    packagingOptions {
+        resources {
+            excludes += ['META-INF/LICENSE*', 'META-INF/NOTICE*', 'META-INF/*.kotlin_module']
+        }
+    }
+
+    lint {
+        // A lint error should stop a release build rather than be scrolled
+        // past. Warnings are left non-fatal so the Capacitor template's own
+        // noise does not block anything.
+        abortOnError true
+        warningsAsErrors false
+        checkReleaseBuilds true
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

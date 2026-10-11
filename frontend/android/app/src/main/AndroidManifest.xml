@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <application
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:usesCleartextTraffic="false"
+        android:allowBackup="false"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:hasFragileUserData="false"
+        android:enableOnBackInvokedCallback="true">
+        <!--
+          allowBackup=false is the important one.
+
+          With backup enabled, `adb backup` on a developer-enabled device and
+          Google's own cloud backup both copy the entire app sandbox off the
+          phone. That sandbox contains the EncryptedSharedPreferences file with
+          the session token in it. Encrypted-at-rest stops mattering once the
+          file can be lifted somewhere the attacker can work on it offline, and
+          this is the finding every mobile pentest report opens with.
+
+          The cost is that a user restoring a new phone signs in again. For an
+          app whose sign-in is an email, a password and a security answer, that
+          is a fair trade.
+
+          usesCleartextTraffic=false is stated here as well as in the network
+          security config because the two are checked by different things: the
+          attribute is what a manifest scanner reads, the config is what the
+          platform enforces.
+
+          enableOnBackInvokedCallback opts into the predictive back gesture
+          (Android 13+). Capacitor dispatches the WebView's back handling
+          through it; without the opt-in, Android 15+ shows the system's
+          back-to-home animation while our handler is still deciding what to
+          do, so a back press out of a dialog visibly starts closing the app.
+        -->
+
+        <activity
+            android:name=".MainActivity"
+            android:label="@string/title_activity_main"
+            android:theme="@style/AppTheme.NoActionBarLaunch"
+            android:launchMode="singleTask"
+            android:exported="true"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
+            android:resizeableActivity="true"
+            android:screenOrientation="fullSensor">
+            <!--
+              resizeableActivity and an unlocked orientation are what make this
+              a tablet and foldable app rather than a phone app being letterboxed.
+              Play's large-screen guidelines treat a locked orientation or a
+              non-resizeable activity as a quality issue, and on a foldable an
+              activity that cannot resize is recreated — and in a WebView, that
+              means a full page reload — on every fold.
+
+              The configChanges list (inherited from the Capacitor template) is
+              what lets the activity survive rotation and unfolding without
+              being destroyed, so the WebView keeps its scroll position, its
+              session and its in-flight polls.
+            -->
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+
+    <!-- Permissions -->
+
+    <!--
+      INTERNET is the only permission this app declares, and that is worth
+      keeping true. It is not a "runtime" permission: nothing is prompted for,
+      nothing appears on the store listing's permissions list beyond network
+      access, and there is no Data Safety question to answer about location,
+      contacts, camera or storage because none are requested.
+
+      Exports avoid a storage permission entirely by writing inside the app
+      sandbox and handing the file to the system share sheet. See
+      src/native/saveFile.js.
+
+      ACCESS_NETWORK_STATE backs @capacitor/network, which the offline banner
+      uses. It is a normal-protection permission, granted at install, and does
+      not surface as a user-facing prompt.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
+      Capacitor's Filesystem plugin ships legacy external-storage permissions
+      in its own manifest for apps that write to shared storage. This app does
+      not, so they are removed from the merged manifest rather than inherited.
+      A declared WRITE_EXTERNAL_STORAGE is a Play Console policy conversation
+      ("why does a dashboard need access to all my files?") that there is no
+      reason to have.
+    -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" tools:node="remove" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" tools:node="remove" />
+
+    <!--
+      Declared so Play lists the app as working on everything rather than
+      filtering it to phones. `required="false"` on the touchscreen is what
+      makes it installable on a Chromebook and on an Android TV-style device
+      with a pointer.
+    -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.location" android:required="false" />
+    <uses-feature android:name="android.hardware.location.gps" android:required="false" />
+</manifest>

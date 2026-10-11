@@ -1,0 +1,183 @@
+/* =============================================================================
+ * IWM — Native app styling
+ * =============================================================================
+ *
+ * Rules that apply when the bundle is running inside the Android or iOS app
+ * rather than a browser tab. `native/shell.js` puts `.native` plus `.ios` or
+ * `.android` on <html> before the first paint, so everything here is scoped
+ * and the web build is untouched.
+ *
+ * Nothing here is cosmetic. Each block fixes something that makes a web app in
+ * a WebView feel like a web app in a WebView.
+ * ========================================================================== */
+
+/* --- Safe areas -------------------------------------------------------------
+ *
+ * `viewport-fit=cover` in index.html lets the page extend under the notch, the
+ * Dynamic Island and the home indicator — which is what you want for the
+ * background, and not at all what you want for a sticky header or the bottom
+ * of a scrolling list. These variables carry the insets so layout can reserve
+ * them where it matters.
+ *
+ * The fallbacks are 0px rather than absent: `env()` with no fallback resolves
+ * to nothing inside a calc(), which invalidates the whole declaration.
+ */
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --kb-height: 0px;
+}
+
+/* --- It must not behave like a document ------------------------------------- */
+
+.native {
+  /* Rubber-band scrolling past the end of the page is the single clearest
+   * "this is a website" tell. The background pulling away from a fixed header
+   * reads as a rendering fault rather than a gesture. */
+  overscroll-behavior: none;
+}
+
+.native body {
+  /* Pull-to-refresh would reload the WebView and throw away the session cache
+   * and every in-flight poll, for a gesture the user makes by accident while
+   * scrolling a dashboard. */
+  overscroll-behavior-y: contain;
+
+  /* The grey flash on every tap. Focus and active states are styled already. */
+  -webkit-tap-highlight-color: transparent;
+
+  /* Long-pressing anything offers "Copy / Look Up / Share…". Appropriate for
+   * body text, absurd on a nav icon or a stat tile. Re-enabled below for the
+   * content that is genuinely worth selecting. */
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Readings, exported numbers and anything a user might want to copy out stay
+ * selectable. A dashboard whose figures cannot be copied is its own
+ * frustration. */
+.native table,
+.native [data-selectable],
+.native input,
+.native textarea {
+  -webkit-touch-callout: default;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* --- The iOS focus-zoom ----------------------------------------------------
+ *
+ * WKWebView zooms the page in when a text field smaller than 16px takes focus,
+ * and does not zoom back out. The layout is then wider than the viewport, the
+ * sticky header is half off-screen, and the only way back is a pinch. Forcing
+ * 16px on every control removes the trigger.
+ *
+ * This is why it is not enough that ui/input.jsx already does `md:text-sm`:
+ * that covers one component, and the app has selects, date pickers and search
+ * boxes of its own.
+ */
+.native input,
+.native select,
+.native textarea {
+  font-size: 16px;
+}
+
+/* --- Touch targets ---------------------------------------------------------
+ *
+ * 44x44pt is Apple's Human Interface minimum and 48x48dp is Android's; both
+ * stores' accessibility reviews check it, and it is the difference between a
+ * table row's sort button being usable and being a coin flip. Applied only to
+ * genuinely interactive elements, and only on touch, so the web build's denser
+ * layout is unaffected.
+ */
+.native button,
+.native a[href],
+.native [role='button'],
+.native [role='option'],
+.native summary {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+/* Inline links inside a sentence are the exception — a 44px tall anchor in a
+ * paragraph blows the line-height apart, and the surrounding text already
+ * gives the finger somewhere to land. */
+.native p a[href],
+.native li a[href],
+.native td a[href],
+.native .inline-link {
+  min-height: 0;
+  min-width: 0;
+}
+
+/* Icon-only controls that are deliberately compact still need the target. The
+ * padding goes outside the visual box so the icon does not grow with it. */
+.native .tap-target {
+  position: relative;
+}
+.native .tap-target::after {
+  content: '';
+  position: absolute;
+  inset: 50% 50% 50% 50%;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+  margin: 0;
+}
+
+/* --- Scrolling -------------------------------------------------------------- */
+
+/* Momentum inside the horizontally-scrolling tables, which otherwise drag like
+ * a desktop scroll area. */
+.native .overflow-x-auto,
+.native .overflow-y-auto,
+.native .overflow-auto {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* The desktop scrollbar styling in index.css draws a 10px track that on a
+ * phone is both useless and a visible grey bar down the side of every table. */
+.native ::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* --- Keyboard --------------------------------------------------------------
+ *
+ * `resize: native` shrinks the WebView, so normal scrolling already keeps the
+ * focused field visible. What it cannot help is anything fixed to the bottom
+ * of the viewport, which the keyboard covers. `--kb-height` is published by
+ * shell.js from the keyboardWillShow event.
+ */
+.native .lift-above-keyboard {
+  padding-bottom: calc(var(--kb-height) + var(--safe-bottom));
+  transition: padding-bottom 180ms ease-out;
+}
+
+/* While the keyboard is up there is no room for decorative chrome, and on a
+ * small phone a sticky header plus a keyboard can leave a form field in a
+ * 120px slot. */
+.native.kb-open .hide-when-keyboard {
+  display: none;
+}
+
+/* --- Animation -------------------------------------------------------------
+ *
+ * The landing page's drifting background orbs and the dashboard's shimmer run
+ * continuously. On a desktop GPU that is free; on a mid-range phone it is a
+ * measurable battery draw for an effect nobody is looking at, and both stores
+ * take a dim view of background power use. Honour the system setting, which
+ * users who are affected by motion have usually already set.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .native *,
+  .native *::before,
+  .native *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

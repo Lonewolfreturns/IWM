@@ -705,7 +705,7 @@ export default function ScaleManagement() {
               value={form.timeZone}
               onChange={(v) => setForm({ ...form, timeZone: v })}
               options={[
-                { value: '', label: `Not set — assume fleet default (${FLEET_TIME_ZONE_LABEL})` },
+                { value: '', label: 'Not set — show times exactly as recorded' },
                 ...COMMON_TIME_ZONES.map((z) => ({ value: z.value, label: z.label })),
               ]}
               testId="scale-timezone-input"
@@ -717,8 +717,10 @@ export default function ScaleManagement() {
                 displayed is the viewer's own preference, set in Settings. */}
             <p className="text-[11px] text-slate-500 mt-1.5">
               The clock this unit's hardware keeps — not where the kitchen is.
-              Readings arrive with no offset, so this is what places them on a
-              timeline. They are then shown in whichever zone you prefer.
+              Left unset, its readings are displayed exactly as the scale wrote
+              them. Set it and they are converted into whichever zone you
+              prefer, which is only worth doing once you know what clock the
+              device actually keeps — the check below infers it.
             </p>
             {/* Only on edit: a scale being provisioned has no readings to
                 infer anything from yet. */}

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  What the FileProvider is allowed to hand out URIs for.
+
+  Narrowed from the Capacitor template, which declared:
+
+      <external-path name="my_images" path="." />
+      <cache-path    name="my_cache_images" path="." />
+
+  `<external-path path=".">` grants the provider the root of shared external
+  storage — the whole of /sdcard, including Downloads, DCIM and every other
+  app's visible files. Nothing in this app reads from there; the only files it
+  shares are reports it just generated in its own cache. A provider scoped that
+  wide is a genuine escalation path (any component that can ask this provider
+  for a URI can then be handed read access to arbitrary user files) and it is
+  flagged by MobSF and by Play's pre-launch security checks.
+
+  The single `exports/` path below is what src/native/saveFile.js writes into,
+  and it is inside the app's private cache directory. `exported="false"` plus
+  `grantUriPermissions="true"` on the provider itself means only the share
+  intent we construct gets access, for as long as that intent lives.
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="iwm_exports" path="exports/" />
+</paths>

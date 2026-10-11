@@ -98,18 +98,37 @@ function LiveActivity({ readings, isLive, loading, zones, displayZone }) {
       const age = at ? now - at.getTime() : null;
       if (age == null) return;
 
-      if (!map.has(r.uid)) {
-        // Rows arrive newest-first from both feeds, so the first sighting of a
-        // UID is its latest reading.
+      // The newest row wins, rather than the first one seen.
+      //
+      // `readings` here is [...live, ...history]: each half is newest-first but
+      // the join is not, so a live row always comes first even when it is
+      // older. And the live band routinely IS older — it is built on the fleet
+      // clock, so for a scale whose hardware keeps a different clock the band
+      // lands an hour into that device's past and matches a real reading from
+      // an hour ago. Taking the first sighting then promoted that stale row to
+      // "latest", and the same clock assumption that selected it mapped it
+      // back to a fresh-looking age. The two errors cancelled into a plausible
+      // number: the panel claimed a minute while the readings table, which
+      // reads the history alone, correctly showed thirteen.
+      const held = map.get(r.uid);
+      if (!held || String(r.dateTime || '') > String(held.lastAt || '')) {
+        const carried = held || {
+          deposited: 0,
+          deposits: 0,
+          strip: new Array(STRIP_BUCKETS).fill(0),
+        };
         map.set(r.uid, {
           uid: r.uid,
           runningTotal: r.runningTotalWeight ?? 0,
           lastReading: r.perDepositWeight ?? 0,
           lastAt: r.dateTime ?? '',
           ageMs: age,
-          deposited: 0,
-          deposits: 0,
-          strip: new Array(STRIP_BUCKETS).fill(0),
+          // Window totals survive the swap. They are summed across every row
+          // in the window rather than read off the latest one, so resetting
+          // them here would discard whatever had already been counted.
+          deposited: carried.deposited,
+          deposits: carried.deposits,
+          strip: carried.strip,
         });
       }
       // Only deposits inside the window count towards the window's totals —
@@ -583,7 +602,11 @@ export default function Dashboard() {
   // The fallback is null, not the browser's zone: a scale with no zone set has
   // an genuinely unknown source, and guessing the viewer's zone would silently
   // shift its timestamps by however far apart the two happen to be.
-  const zones = useMemo(() => buildZoneMap(scales, FLEET_TIME_ZONE), [scales]);
+  // `null` fallback, so a scale with no configured clock has an UNKNOWN
+  // source zone and its timestamps are rendered verbatim — the time the
+  // kitchen actually saw. Only a scale whose `timeZone` has been set
+  // explicitly gets converted to the viewer's zone.
+  const zones = useMemo(() => buildZoneMap(scales, null), [scales]);
 
   // The live feed in front of the week of history, newest-first. Quick Scale
   // Status already merges these two; Live Activity now reads the same list, so
@@ -876,7 +899,7 @@ export default function Dashboard() {
                         title={
                           s.ownZone
                             ? `Recorded on this scale's own clock (${s.sourceZone})`
-                            : `No zone set on this scale — read on the fleet clock: ${FLEET_TIME_ZONE_LABEL}`
+                            : `No clock set — times shown exactly as the scale recorded them. Ages assume ${FLEET_TIME_ZONE_LABEL}`
                         }
                       >
                         {[s.location, s.lastSeenLabel].filter(Boolean).join(' · ')}

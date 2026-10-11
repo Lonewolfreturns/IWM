@@ -9,17 +9,22 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { buildXLSX } from './xlsx.js';
+import { saveFile } from '../native/saveFile.js';
 
+/*
+ * Every export in this file ends here.
+ *
+ * On the web this is still an `<a download>` click. In the Android and iOS
+ * apps there is no download manager for that to talk to, so the blob is
+ * written into the app's cache and handed to the system share sheet instead.
+ * See native/saveFile.js.
+ *
+ * Returns the promise so a caller can tell a completed save from a dismissed
+ * share sheet. Nothing awaits it today — the exports are fire-and-forget from
+ * a click handler — but swallowing it here would make that impossible to add.
+ */
 function triggerDownload(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.style.display = 'none';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return saveFile(blob, filename);
 }
 
 // -----------------------------------------------------------------------------
@@ -35,7 +40,7 @@ export function downloadCSV(filename, columns, rows) {
   const blob = new Blob(['\ufeff' + header + '\n' + body], {
     type: 'text/csv;charset=utf-8',
   });
-  triggerDownload(blob, filename);
+  return triggerDownload(blob, filename);
 }
 
 // -----------------------------------------------------------------------------
@@ -48,7 +53,7 @@ export function downloadCSV(filename, columns, rows) {
 // `sheets` is passed straight through to buildXLSX; see xlsx.js for the shape.
 // -----------------------------------------------------------------------------
 export function downloadXLSX(filename, sheets) {
-  triggerDownload(buildXLSX(sheets), filename);
+  return triggerDownload(buildXLSX(sheets), filename);
 }
 
 // -----------------------------------------------------------------------------
@@ -58,7 +63,7 @@ export function downloadJSON(filename, data) {
   const blob = new Blob([JSON.stringify(data, null, 2)], {
     type: 'application/json',
   });
-  triggerDownload(blob, filename);
+  return triggerDownload(blob, filename);
 }
 
 // -----------------------------------------------------------------------------
@@ -634,7 +639,10 @@ export function downloadPDF(filename, opts) {
     });
   }
 
-  doc.save(filename);
+  // `doc.save()` is jsPDF's own `<a download>` click, so it silently does
+  // nothing inside a WebView. Taking the blob and routing it through the same
+  // path as every other export is what makes PDF reports work in the apps.
+  return triggerDownload(doc.output('blob'), filename);
 }
 
 // -----------------------------------------------------------------------------

@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  IWM iOS PRIVACY MANIFEST
+
+  Required by Apple for every app since 1 May 2024. An upload without it, or
+  one that uses a "required reason API" it has not declared, is rejected at
+  processing time with ITMS-91053 before a human ever looks at the build.
+
+  This file has to stay honest in both directions. Declaring data the app does
+  not collect invites review questions that cannot be answered by pointing at
+  the code; omitting data it does collect is a compliance problem and, where it
+  contradicts the App Privacy answers in App Store Connect, a rejection.
+
+  IT MUST BE A MEMBER OF THE XCODE TARGET
+
+  Creating the file is not enough. With classic Xcode groups, a file that no
+  build phase references is absent from the IPA and Apple rejects the upload
+  exactly as if it had never been written. It is wired into the App target's
+  Copy Bundle Resources phase in project.pbxproj; `npx cap sync ios` does not
+  remove it, but if the iOS platform is ever regenerated from scratch, this has
+  to be redone. See aws/SETUP-MOBILE.md.
+
+  KEEP IN STEP WITH
+
+    * the App Privacy questionnaire in App Store Connect
+    * aws/STORE-DATA-SAFETY.md (the Play Data Safety answers)
+    * the privacy policy at foodloss.ca/privacy
+
+  Apple compares the first two against each other, and both against the app.
+-->
+<plist version="1.0">
+<dict>
+
+	<!--
+	  No tracking. Nothing in this app correlates a user with data from other
+	  apps or websites. There is no advertising identifier, no analytics SDK,
+	  no attribution framework and no third-party tracker. That is what lets
+	  this be false and the domains list be empty.
+
+	  If this is ever set true, the app must also present the App Tracking
+	  Transparency prompt. Declaring tracking without requesting authorisation
+	  is itself a rejection.
+	-->
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+
+	<!--
+	  What the app collects, which is only what an account needs.
+
+	  All of it goes to our own AWS Lambda endpoints and nowhere else. It is
+	  linked to the user's identity, which is the point of an account; it is
+	  not used for tracking; and the purpose is App Functionality in every
+	  case, because there is no analytics, advertising or personalisation.
+
+	  Food-waste readings are not listed. They are measurements belonging to an
+	  organisation's kitchen equipment, keyed by a device UID, and are not one
+	  of Apple's collected data types. The account that can read them is
+	  declared below, which is the part that identifies a person.
+	-->
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeEmailAddress</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeName</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypePhoneNumber</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<!--
+		  Organisation and city, both collected at sign-up. "Other Data Types"
+		  is Apple's catch-all; neither has a specific category, and both are
+		  business attributes rather than personal ones.
+		-->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeOtherDataTypes</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+	</array>
+
+	<!--
+	  Required-reason APIs.
+
+	  Apple's check is on what is linked into the binary, not on which code
+	  paths a user actually reaches, so a plugin that can touch one of these
+	  counts even where the app never calls that method.
+
+	  File timestamps come from @capacitor/filesystem, whose stat() returns
+	  ctime and mtime. The app only writes report files and asks for their URI,
+	  and every file it touches is inside its own container.
+
+	  C617.1 is "to access the timestamps of files inside the app container,
+	  app group container, or CloudKit container", which is exactly and only
+	  what happens here. See src/native/saveFile.js.
+	-->
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

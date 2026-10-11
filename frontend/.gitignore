@@ -22,3 +22,47 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# ---------------------------------------------------------------------------
+# Mobile (Capacitor)
+# ---------------------------------------------------------------------------
+# The native projects themselves ARE committed. They hold hand-written
+# configuration that cannot be regenerated — the hardened AndroidManifest, the
+# network security configs, the privacy manifest and its registration in the
+# Xcode project. `npx cap add` would overwrite all of it with the template.
+#
+# What is ignored below is build output, machine-local state, and signing
+# material.
+
+# Signing. A keystore in version control is the whole app's identity: anyone
+# with it and the password can publish an update that Play and users will
+# accept as genuine. Keep it in a password manager, and back it up — losing it
+# means the app can never be updated again under the same listing.
+android/keystore.properties
+*.keystore
+*.jks
+
+# Generated from assets/ by `npm run mobile:assets`; derived art, not source.
+android/app/src/main/res/mipmap-*/
+android/app/src/main/res/drawable*/splash.png
+android/app/src/main/res/values/ic_launcher_background.xml
+ios/App/App/Assets.xcassets/AppIcon.appiconset/*.png
+ios/App/App/Assets.xcassets/Splash.imageset/*.png
+
+# The web bundle, copied in by `cap sync` from build/.
+android/app/src/main/assets/public/
+ios/App/App/public/
+
+# Gradle / Xcode build output and local machine state.
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/captures/
+ios/App/build/
+ios/App/Pods/
+ios/App/output/
+ios/App/App.xcworkspace/xcuserdata/
+ios/App/App.xcodeproj/xcuserdata/
+ios/DerivedData/

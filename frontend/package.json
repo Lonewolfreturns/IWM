@@ -3,6 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
+    "@aparajita/capacitor-secure-storage": "^8.0.1",
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/app": "^8.1.2",
+    "@capacitor/browser": "^8.0.5",
+    "@capacitor/core": "^8.5.3",
+    "@capacitor/filesystem": "^8.1.4",
+    "@capacitor/ios": "^8.5.3",
+    "@capacitor/keyboard": "^8.0.6",
+    "@capacitor/network": "^8.0.1",
+    "@capacitor/share": "^8.0.3",
+    "@capacitor/splash-screen": "^8.0.2",
+    "@capacitor/status-bar": "^8.0.4",
     "@hookform/resolvers": "^5.0.1",
     "@radix-ui/react-accordion": "^1.2.8",
     "@radix-ui/react-alert-dialog": "^1.1.11",
@@ -61,7 +73,14 @@
     "dev": "vite --host 0.0.0.0 --port 3000",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --port 3000",
-    "dev:https": "node scripts/dev-https.mjs"
+    "dev:https": "node scripts/dev-https.mjs",
+    "mobile:assets": "node scripts/make-app-assets.mjs && capacitor-assets generate",
+    "mobile:check": "python scripts/validate-native-config.py",
+    "mobile:sync": "npm run build && cap sync",
+    "mobile:android": "npm run mobile:sync && cap open android",
+    "mobile:ios": "npm run mobile:sync && cap open ios",
+    "mobile:apk": "npm run mobile:sync && cd android && gradlew.bat assembleRelease",
+    "mobile:aab": "npm run mobile:sync && cd android && gradlew.bat bundleRelease"
   },
   "browserslist": {
     "production": [
@@ -77,6 +96,8 @@
   },
   "devDependencies": {
     "@babel/plugin-proposal-private-property-in-object": "^7.21.11",
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^8.5.3",
     "@eslint/js": "9.23.0",
     "@tanstack/react-query": "^5.100.14",
     "@vitejs/plugin-basic-ssl": "^2.3.0",
@@ -90,6 +111,7 @@
     "framer-motion": "^12.40.0",
     "globals": "15.15.0",
     "postcss": "^8.4.49",
+    "sharp": "^0.35.5",
     "tailwindcss": "^3.4.17",
     "vite": "^8.0.14"
   },

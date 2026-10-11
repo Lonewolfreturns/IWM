@@ -1,0 +1,280 @@
+# =============================================================================
+# IWM — cloud builds for the Android and iOS apps
+# =============================================================================
+#
+# WHY THIS EXISTS
+#
+# The project is developed on Windows, which can build Android given a local
+# JDK and SDK, and can never build iOS — that needs macOS and Xcode. This
+# workflow is the substitute for owning a Mac: GitHub's macos-latest runners
+# have Xcode preinstalled, so the iOS app is compiled here or not at all.
+#
+# It is also the Capacitor answer to Expo's EAS Build. EAS only builds React
+# Native projects, so it cannot build this app, but the thing people actually
+# want from EAS — "compile both platforms without the local toolchain" — is
+# what these two jobs do. Free for public repos; private repos bill macOS
+# minutes at 10x, so the iOS job is kept off the default path (see below).
+#
+# TRIGGERS
+#
+#   workflow_dispatch   run it by hand from the Actions tab, picking platform
+#   push of a v* tag    cut a release build of both
+#
+# Deliberately NOT on every push. A macOS minute costs ten; building both
+# platforms on each commit to main would burn the free allowance in days for
+# no benefit, since the web build already runs on every push elsewhere.
+# =============================================================================
+
+name: Mobile build
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Which app to build
+        type: choice
+        default: android
+        options: [android, ios, both]
+      variant:
+        description: Android output
+        type: choice
+        default: debug
+        options:
+          - debug    # installable APK, debug-signed, no keystore needed
+          - release  # AAB for Play, needs the signing secrets
+  push:
+    tags: ['v*']
+
+# A second run of the same ref cancels the first. These are long jobs and
+# nobody wants the build from three pushes ago finishing last.
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '24'
+  # Must match the toolchain Capacitor 8 targets. Both capacitor-android and
+  # our app module compile at VERSION_21; anything older fails at the first
+  # Gradle task with "Unsupported class file major version".
+  JAVA_VERSION: '21'
+
+jobs:
+  # ===========================================================================
+  android:
+    if: >-
+      github.event_name == 'push' ||
+      inputs.platform == 'android' || inputs.platform == 'both'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - uses: android-actions/setup-android@v3
+
+      # Caches ~/.gradle between runs. Without it every build re-downloads
+      # Gradle 8.14.3 and the whole AGP dependency tree, which is most of the
+      # wall time.
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # Cheap, and it fails the build before twenty minutes of Gradle if
+      # someone has broken the hardened manifest or the privacy manifest's
+      # registration in the Xcode project.
+      - name: Validate native config
+        working-directory: frontend
+        run: python3 scripts/validate-native-config.py
+
+      - name: Build web bundle
+        working-directory: frontend
+        run: npm run build
+        env:
+          # Vite inlines these at build time, so they must be present HERE and
+          # not at runtime. They are Lambda Function URLs rather than secrets
+          # in the credential sense — every shipped client contains them, and
+          # the endpoints are token-gated — but they are kept in repository
+          # secrets so the URLs are not in git history.
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+          VITE_CORE_API_URL: ${{ secrets.VITE_CORE_API_URL }}
+          VITE_READINGS_API_URL: ${{ secrets.VITE_READINGS_API_URL }}
+          VITE_ANALYTICS_API_URL: ${{ secrets.VITE_ANALYTICS_API_URL }}
+          VITE_REPORTS_API_URL: ${{ secrets.VITE_REPORTS_API_URL }}
+
+      - name: Sync Capacitor
+        working-directory: frontend
+        run: npx cap sync android
+
+      # The keystore travels as base64 in a secret and is written to disk only
+      # for the length of the job. Skipped entirely for debug builds, which are
+      # signed with the throwaway debug key the SDK generates.
+      - name: Restore signing keystore
+        id: signing
+        if: inputs.variant == 'release' || github.event_name == 'push'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set — the AAB will be UNSIGNED and Play will reject it. See aws/SETUP-MOBILE.md."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > frontend/android/iwm-release.jks
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build debug APK
+        if: inputs.variant == 'debug' && github.event_name == 'workflow_dispatch'
+        working-directory: frontend/android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Build release AAB
+        if: inputs.variant == 'release' || github.event_name == 'push'
+        working-directory: frontend/android
+        env:
+          IWM_KEYSTORE_PATH: ${{ github.workspace }}/frontend/android/iwm-release.jks
+          IWM_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          IWM_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          IWM_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          # Play rejects a versionCode it has already accepted, so it is
+          # derived from the run number rather than the committed 1.
+          ./gradlew bundleRelease --no-daemon \
+            -PiwmVersionCode=${{ github.run_number }} \
+            -PiwmVersionName=${{ github.ref_type == 'tag' && github.ref_name || '1.0.0' }}
+
+      # Always removed, even if the build failed. A keystore left in the
+      # workspace can be picked up by a later step or an artifact upload.
+      - name: Shred keystore
+        if: always()
+        run: rm -f frontend/android/iwm-release.jks
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-${{ inputs.variant || 'release' }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            frontend/android/app/build/outputs/apk/debug/*.apk
+            frontend/android/app/build/outputs/bundle/release/*.aab
+
+  # ===========================================================================
+  ios:
+    if: >-
+      github.event_name == 'push' ||
+      inputs.platform == 'ios' || inputs.platform == 'both'
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build web bundle
+        working-directory: frontend
+        run: npm run build
+        env:
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+          VITE_CORE_API_URL: ${{ secrets.VITE_CORE_API_URL }}
+          VITE_READINGS_API_URL: ${{ secrets.VITE_READINGS_API_URL }}
+          VITE_ANALYTICS_API_URL: ${{ secrets.VITE_ANALYTICS_API_URL }}
+          VITE_REPORTS_API_URL: ${{ secrets.VITE_REPORTS_API_URL }}
+
+      # Capacitor 8 resolves iOS dependencies through Swift Package Manager,
+      # so there is no `pod install` step. This is also why the iOS project
+      # could be generated on Windows in the first place.
+      - name: Sync Capacitor
+        working-directory: frontend
+        run: npx cap sync ios
+
+      # Compiles for the simulator with signing off. This needs no Apple
+      # Developer account, no certificates and no provisioning profile, and it
+      # proves the thing that actually matters from a Windows machine: that the
+      # Xcode project is valid, the Swift packages resolve, and every plugin
+      # compiles. It does NOT produce anything installable on a real device or
+      # uploadable to App Store Connect — see below.
+      - name: Compile (unsigned, simulator)
+        working-directory: frontend/ios/App
+        run: |
+          xcodebuild \
+            -scheme App \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      # Confirms the privacy manifest actually made it into the bundle.
+      # Creating PrivacyInfo.xcprivacy is not enough — it has to be a member of
+      # the target's Copy Bundle Resources phase, and when it is not, the file
+      # looks right in the repo and Apple rejects the upload with ITMS-91053.
+      # Catching that here costs a second; catching it at App Store Connect
+      # costs a round trip.
+      - name: Verify privacy manifest is in the app bundle
+        working-directory: frontend/ios/App
+        run: |
+          APP=$(find build/Build/Products -name 'App.app' -maxdepth 3 | head -1)
+          if [ -z "$APP" ]; then echo "::error::App.app not found"; exit 1; fi
+          if [ ! -f "$APP/PrivacyInfo.xcprivacy" ]; then
+            echo "::error::PrivacyInfo.xcprivacy is missing from the built app — Apple will reject this with ITMS-91053. Re-run frontend/scripts/validate-native-config.py and check the Copy Bundle Resources phase."
+            exit 1
+          fi
+          echo "PrivacyInfo.xcprivacy present:"
+          plutil -p "$APP/PrivacyInfo.xcprivacy"
+
+# =============================================================================
+# SHIPPING TO THE APP STORE
+#
+# The iOS job above verifies the build; it does not release it. Archiving a
+# signed IPA needs an Apple Developer Program membership ($99/yr) and three
+# more secrets — a distribution certificate (.p12), its password, and a
+# provisioning profile — installed into a temporary keychain on the runner.
+#
+# That is worth adding once the membership exists and the app has been through
+# review manually at least once. Until then the realistic path is: run this
+# job to confirm it compiles, then do the Archive and upload from a Mac
+# (a borrowed one, or a rented cloud Mac for an afternoon).
+#
+# SECRETS THIS WORKFLOW READS
+#
+#   VITE_API_URL, VITE_CORE_API_URL, VITE_READINGS_API_URL,
+#   VITE_ANALYTICS_API_URL, VITE_REPORTS_API_URL
+#       The five Lambda Function URLs, copied from frontend/.env.
+#       Without them the app builds but every request 404s.
+#
+#   ANDROID_KEYSTORE_BASE64      base64 of iwm-release.jks
+#   ANDROID_KEYSTORE_PASSWORD
+#   ANDROID_KEY_ALIAS
+#   ANDROID_KEY_PASSWORD
+#       Release Android builds only. Debug builds need none of them.
+#
+# To produce the keystore secret on Windows:
+#   [Convert]::ToBase64String([IO.File]::ReadAllBytes("iwm-release.jks")) | Set-Clipboard
+# =============================================================================

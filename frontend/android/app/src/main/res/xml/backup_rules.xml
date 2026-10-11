@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Auto Backup rules, for Android 11 and below (API <= 30).
+
+  `allowBackup` is false in the manifest, so in practice nothing is backed up
+  and this file is belt-and-braces. It is declared anyway because
+  `allowBackup` can be re-enabled by a library's manifest merge, and if that
+  happens the default is to back up EVERYTHING in the app sandbox — including
+  the EncryptedSharedPreferences file holding the session token and the
+  WebView's own storage.
+
+  An encrypted preferences file is not safe to export: the ciphertext travels
+  to Google's servers and can be restored onto a different device, where the
+  Keystore key it was encrypted with does not exist. The restore therefore
+  cannot read it, which is useless at best, and at worst leaves the app with a
+  corrupt store it has to detect and clear. Excluding it is both the secure and
+  the correct behaviour.
+-->
+<full-backup-content>
+    <!-- The session. EncryptedSharedPreferences writes here. -->
+    <exclude domain="sharedpref" path="." />
+    <!-- WebView localStorage/IndexedDB, and the exported-report cache. -->
+    <exclude domain="database" path="." />
+    <exclude domain="file" path="." />
+    <exclude domain="external" path="." />
+    <exclude domain="root" path="." />
+</full-backup-content>

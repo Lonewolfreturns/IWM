@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CAPACITOR_DEBUG</key>
+	<string>$(CAPACITOR_DEBUG)</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>IWM Smart Scale</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+
+	<!--
+	  App Transport Security.
+
+	  No exceptions, which is the point. Every endpoint the app uses is HTTPS:
+	  the five Lambda Function URLs and foodloss.ca. ATS is on by default, so
+	  this block changes nothing at runtime — it exists so that neither
+	  NSAllowsArbitraryLoads nor a per-domain exception can be added later
+	  without someone deliberately editing a key that says false.
+
+	  A single NSAllowsArbitraryLoads=true is one of the few things that draws
+	  a written question from App Review ("explain why your app requires an
+	  exception to ATS"), and it is answered most easily by not needing one.
+	-->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<false/>
+		<key>NSAllowsLocalNetworking</key>
+		<false/>
+	</dict>
+
+	<!--
+	  Export-compliance declaration.
+
+	  false here means "this app uses encryption, and all of it is exempt".
+	  The app's only cryptography is HTTPS via the OS and the Keychain, both of
+	  which fall under the standard exemption for using Apple-provided
+	  encryption. Declaring it in the plist is what stops App Store Connect
+	  asking the export-compliance questions on every single upload, which is
+	  otherwise a manual step per build.
+
+	  If custom cryptography is ever added — encrypting report files before
+	  upload, say — this must be revisited, and a self-classification report
+	  may be required.
+	-->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+
+	<!--
+	  No usage-description keys are present, and that is correct: the app
+	  requests no protected resources. No camera, no microphone, no location,
+	  no contacts, no photo library, no Bluetooth, no tracking.
+
+	  This matters beyond tidiness. A usage-description string in the plist for
+	  a permission the app never requests still causes App Review to look for
+	  the feature that justifies it, and "declared but unused" is a rejection
+	  under guideline 5.1.1. Report exports go through UIActivityViewController
+	  on a file in the app's own container, which needs no photo-library or
+	  files permission at all.
+	-->
+
+	<!--
+	  Non-exempt background modes are absent too. The dashboard polls only
+	  while it is on screen, so there is no UIBackgroundModes array — another
+	  thing App Review checks against actual behaviour.
+	-->
+
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneConfigurationName</key>
+					<string>Default Configuration</string>
+					<key>UISceneDelegateClassName</key>
+					<string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+					<key>UISceneStoryboardFile</key>
+					<string>Main</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<key>UIMainStoryboardFile</key>
+	<string>Main</string>
+
+	<!--
+	  The armv7 capability the Capacitor template ships is removed.
+
+	  armv7 is 32-bit, last seen in the iPhone 5 and unsupported since iOS 11.
+	  Requiring it on a project whose deployment target is iOS 14+ is
+	  meaningless, and a UIRequiredDeviceCapabilities entry no current device
+	  reports is a real way to have an app filtered out of the store for
+	  hardware it runs on perfectly well.
+	-->
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+
+	<!--
+	  Orientation.
+
+	  iPhone keeps portrait and both landscapes but not upside-down, matching
+	  what the hardware does. iPad allows all four, which is what Apple expects
+	  from an iPad build and is a prerequisite for the multitasking support
+	  below.
+	-->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+
+	<!--
+	  Split View and Slide Over on iPad.
+
+	  Requires that the app handle arbitrary window sizes, which the web layout
+	  does: its breakpoints are driven by the viewport, so a 320pt-wide Slide
+	  Over column gets the phone layout and a full-screen iPad gets the desktop
+	  sidebar, with no extra work. Opting out would be the odd choice here.
+	-->
+	<key>UIRequiresFullScreen</key>
+	<false/>
+
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<true/>
+
+	<!--
+	  The app is dark-only — the web bundle hard-codes `class="dark"` on <html>
+	  and the palette has no light variant. Telling iOS this pins the status
+	  bar, the keyboard and the share sheet to dark too. Without it, a user on
+	  Light appearance gets a white keyboard and a white share sheet against a
+	  navy app.
+	-->
+	<key>UIUserInterfaceStyle</key>
+	<string>Dark</string>
+</dict>
+</plist>

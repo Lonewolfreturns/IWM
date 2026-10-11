@@ -13,6 +13,7 @@ import { getCurrentUser, changeCredentials } from '../services/auth';
 import { getScales, updateScale } from '../services/scales';
 import { updateMyProfile } from '../services/profile';
 import SelectMenu from '../components/common/SelectMenu.jsx';
+import DeleteAccountCard from '../components/common/DeleteAccountCard.jsx';
 import { COMMON_TIME_ZONES } from '../lib/time.js';
 
 // Kept in step with SECRET_QUESTIONS in SignUp.jsx — a question set here has
@@ -86,6 +87,19 @@ function PasswordField({ id, label, value, onChange, placeholder, autoComplete }
  * both — which should cost one round of typing, not two.
  */
 function SecurityTab({ user }) {
+  return (
+    <div className="space-y-6">
+      <CredentialsCard user={user} />
+      {/* Account deletion lives under Password & Security rather than in a tab
+          of its own. It is an account-level action, it is where a reviewer
+          looks for it, and burying it would defeat the "readily discoverable"
+          requirement it exists to satisfy. */}
+      <DeleteAccountCard user={user} />
+    </div>
+  );
+}
+
+function CredentialsCard({ user }) {
   const [currentPassword, setCurrentPassword] = useState('');
   const [currentSecretAnswer, setCurrentSecretAnswer] = useState('');
   const [newPassword, setNewPassword] = useState('');

@@ -3,13 +3,18 @@
 // /signup; admins are pre-provisioned in DynamoDB and cannot self-register.
 import { authApi } from './api';
 import { clearDashboardCache } from '../lib/dashboardCache.js';
+import {
+  getToken as readToken,
+  getUser,
+  setSession,
+  clearSession,
+} from '../native/session.js';
 
-const TOKEN_KEY = 'ww_token';
-const USER_KEY = 'ww_user';
-
+// Session persistence lives in native/session.js: localStorage on the web, the
+// iOS Keychain / Android EncryptedSharedPreferences in the apps. This wrapper
+// stays here so the rest of the app keeps importing auth the way it always has.
 function persistSession(token, user) {
-  localStorage.setItem(TOKEN_KEY, token);
-  localStorage.setItem(USER_KEY, JSON.stringify(user));
+  return setSession(token, user);
 }
 
 // Credentials: email + password + secretAnswer (the answer to the security
@@ -23,7 +28,10 @@ export async function login({ email, password, secretAnswer }) {
     password,
     secretAnswer,
   });
-  persistSession(data.token, data.user);
+  // Awaited, unlike the old synchronous localStorage write: the secure store is
+  // asynchronous, and resolving before it completes would let the caller
+  // navigate to the dashboard with the token still only in memory.
+  await persistSession(data.token, data.user);
   return data;
 }
 
@@ -50,7 +58,7 @@ export async function signup({
     phone,
     role: 'client',
   });
-  persistSession(data.token, data.user);
+  await persistSession(data.token, data.user);
   return data;
 }
 
@@ -80,13 +88,12 @@ export async function changeCredentials({
     ...(newSecretQuestion ? { newSecretQuestion } : {}),
     ...(newSecretAnswer ? { newSecretAnswer } : {}),
   });
-  persistSession(data.token, data.user);
+  await persistSession(data.token, data.user);
   return data;
 }
 
-export function logout() {
-  localStorage.removeItem(TOKEN_KEY);
-  localStorage.removeItem(USER_KEY);
+export async function logout() {
+  await clearSession();
   // The dashboard keeps its last response in memory so navigation is instant.
   // Clearing it here covers every exit — the buttons, and the expired-token
   // path below — so a new sign-in never paints the previous account's scales.
@@ -94,16 +101,11 @@ export function logout() {
 }
 
 export function getCurrentUser() {
-  try {
-    const raw = localStorage.getItem(USER_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
+  return getUser();
 }
 
 export function getToken() {
-  return localStorage.getItem(TOKEN_KEY);
+  return readToken();
 }
 
 /**

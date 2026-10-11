@@ -68,6 +68,25 @@
  */
 export const FLEET_TIME_ZONE = 'Etc/GMT+4';
 
+/*
+ * WHERE THIS IS AND IS NOT USED
+ *
+ * Not for display. Timestamps are shown exactly as the scale recorded them —
+ * "12:01" on the device reads "12:01" on screen. Converting them meant
+ * assuming every unit keeps UTC-4, and the fleet does not: a scale already on
+ * Atlantic daylight time had an hour added and appeared to report in the
+ * future, which is a worse failure than showing the raw value.
+ *
+ * It is still used for ELAPSED TIME — "reported 2 hours ago", the 24h active
+ * window, the silence alerts. Those need some instant to subtract from, and a
+ * bare wall clock is not one. Being a few hours out almost never moves a
+ * reading across the 24h or 7d boundary those tiers are cut at, so an
+ * assumption is tolerable there in a way it is not for a printed timestamp.
+ *
+ * A scale with its own `timeZone` set is still converted on display: that is
+ * a stated fact about the device rather than a fleet-wide guess.
+ */
+
 /** Human-readable form of the above, for tooltips and settings copy. */
 export const FLEET_TIME_ZONE_LABEL = 'Atlantic Standard (UTC-4, no daylight saving)';
 
@@ -314,7 +333,7 @@ export function relativeTime(dateTime, sourceZone, now = Date.now(), assumeZone 
  * fallback is meaningful — it marks the source zone as genuinely unknown, so
  * timestamps render verbatim instead of being converted on a guess.
  */
-export function buildZoneMap(scales, fallback = FLEET_TIME_ZONE) {
+export function buildZoneMap(scales, fallback = null) {
   const map = {};
   (scales || []).forEach((s) => {
     const id = s.scaleId || s.id;

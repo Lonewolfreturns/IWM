@@ -1,7 +1,9 @@
-import { Suspense, lazy } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Suspense, lazy, useEffect } from 'react';
+import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import { isAuthenticated } from './services/auth';
+import { setUnauthorizedHandler } from './services/api';
+import { setRouterBack } from './native/shell.js';
 import MainLayout from './layouts/MainLayout.jsx';
 import LoadingSpinner from './components/common/LoadingSpinner.jsx';
 
@@ -16,6 +18,8 @@ const UserManagement = lazy(() => import('./pages/UserManagement.jsx'));
 const DataConfiguration = lazy(() => import('./pages/DataConfiguration.jsx'));
 const SystemLogs = lazy(() => import('./pages/SystemLogs.jsx'));
 const Settings = lazy(() => import('./pages/Settings.jsx'));
+const Privacy = lazy(() => import('./pages/Privacy.jsx'));
+const DeleteAccount = lazy(() => import('./pages/DeleteAccount.jsx'));
 
 /*
  * ROUTE TRANSITIONS WERE REMOVED, AND THIS IS WHY.
@@ -44,7 +48,42 @@ const Settings = lazy(() => import('./pages/Settings.jsx'));
  * Suspense stays at the top so a lazy chunk shows one spinner while it loads.
  */
 
+/*
+ * Routes that are the end of the line for the Android back button.
+ *
+ * Pressing back on one of these minimises the app rather than navigating. The
+ * dashboard is where a signed-in user starts, and the landing page is where a
+ * signed-out one does, so in both cases there is nothing behind them that the
+ * user chose to visit — only whatever redirect put them there. Letting history
+ * unwind past it walks backwards through those redirects, which from the
+ * user's side looks like the back button flashing the screen and doing
+ * nothing.
+ */
+const BACK_EXITS_APP = ['/', '/dashboard', '/login'];
+
 export default function App() {
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  // A 401 anywhere in the app routes through here instead of assigning
+  // window.location, which in the native apps would reload the whole WebView.
+  // See services/api.js.
+  useEffect(() => {
+    setUnauthorizedHandler(() => navigate('/login', { replace: true }));
+    return () => setUnauthorizedHandler(null);
+  }, [navigate]);
+
+  // Tells the native shell what the back button should do when no open dialog
+  // has claimed it. Returning true means "handled, stop here".
+  useEffect(() => {
+    setRouterBack(() => {
+      if (BACK_EXITS_APP.includes(location.pathname)) return false;
+      navigate(-1);
+      return true;
+    });
+    return () => setRouterBack(null);
+  }, [navigate, location.pathname]);
+
   return (
     <Suspense
       fallback={
@@ -72,6 +111,22 @@ export default function App() {
               <SignUp />
             }
           />
+
+          {/*
+            Public on purpose, and outside ProtectedRoute.
+
+            Both are store requirements rather than product pages. Apple will
+            not accept a submission without a reachable privacy policy URL, and
+            Play's User Data policy requires an account-deletion route that
+            works for someone who has already uninstalled the app — which means
+            it cannot sit behind a sign-in. Both URLs are submitted in the store
+            listings, so their paths are part of the contract:
+
+              https://foodloss.ca/privacy
+              https://foodloss.ca/delete-account
+          */}
+          <Route path="/privacy" element={<Privacy />} />
+          <Route path="/delete-account" element={<DeleteAccount />} />
 
           <Route
             element={

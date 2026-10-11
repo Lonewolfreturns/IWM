@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { motion, useInView } from 'framer-motion';
 import {
   ArrowRight, Scale as ScaleIcon, BarChart3, FileText, Leaf,
@@ -566,18 +566,44 @@ export default function Landing() {
       </main>
 
       {/* Footer */}
-      <footer className="relative z-10 border-t border-ink-600/50 px-5 sm:px-8 lg:px-14 py-7">
-        <div className="max-w-5xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
+      <footer
+        className="relative z-10 border-t border-ink-600/50 px-5 sm:px-8 lg:px-14 py-7"
+        style={{ paddingBottom: 'calc(1.75rem + var(--safe-bottom))' }}
+      >
+        <div className="max-w-5xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
           <p className="text-xs text-slate-500">
             © {new Date().getFullYear()} IWM · Innovative Waste Management
           </p>
-          <button
-            type="button"
-            onClick={go}
-            className="text-xs font-semibold text-sky hover:text-sky/80"
-          >
-            {authed ? 'Go to dashboard →' : 'Sign in →'}
-          </button>
+
+          {/*
+            The privacy policy and the deletion route are linked from the
+            public footer because that is what makes them "readily
+            discoverable" in the sense both stores mean. Apple needs a reachable
+            privacy URL for the listing; Play needs a deletion route that works
+            for someone who has already uninstalled the app, and a reviewer
+            looks for it here before anywhere else.
+          */}
+          <div className="flex items-center gap-4">
+            <Link
+              to="/privacy"
+              className="text-xs text-slate-500 hover:text-slate-300 transition-colors inline-link"
+            >
+              Privacy
+            </Link>
+            <Link
+              to="/delete-account"
+              className="text-xs text-slate-500 hover:text-slate-300 transition-colors inline-link"
+            >
+              Delete account
+            </Link>
+            <button
+              type="button"
+              onClick={go}
+              className="text-xs font-semibold text-sky hover:text-sky/80"
+            >
+              {authed ? 'Go to dashboard →' : 'Sign in →'}
+            </button>
+          </div>
         </div>
       </footer>
     </div>

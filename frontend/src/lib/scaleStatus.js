@@ -61,7 +61,19 @@ export function latestByUid(...feeds) {
       // other are the same physical scale, and an exact-match join silently
       // reports it as never having reported.
       const key = String(r?.uid || '').trim().toLowerCase();
-      if (key && !latest.has(key)) latest.set(key, r);
+      if (!key) return;
+      // Kept by TIMESTAMP, not by whichever feed was concatenated first.
+      //
+      // Each feed is internally newest-first, but the caller passes
+      // (live, history) and every live row therefore precedes every history
+      // row — the concatenation is not globally ordered. The live endpoint
+      // returns whatever its narrow band matched, which can be OLDER than the
+      // newest row in the history window, so taking the first sighting pinned
+      // a scale's "last seen" to a stale reading.
+      const prev = latest.get(key);
+      if (!prev || String(r.dateTime || '') > String(prev.dateTime || '')) {
+        latest.set(key, r);
+      }
     });
   });
   return latest;

@@ -19,8 +19,12 @@ export default function Navbar({ title, onMenuClick }) {
     return () => window.removeEventListener('mousedown', handler);
   }, []);
 
-  const handleLogout = () => {
-    logout();
+  const handleLogout = async () => {
+    // Awaited so the token is gone from the Keychain / Keystore before the app
+    // leaves the screen. `clearSession` drops the in-memory copy first, so
+    // every synchronous `isAuthenticated()` on the way out already reads
+    // false — the await is only about the durable copy.
+    await logout();
     toast.success('Logged out successfully');
     // Home, not the sign-in form. Signing out is a decision to stop using the
     // app, and dropping straight onto a login box reads as "you got signed
@@ -32,9 +36,14 @@ export default function Navbar({ title, onMenuClick }) {
   return (
     <header
       data-testid="top-navbar"
-      className="sticky top-0 z-20 h-16 glass-strong border-b border-ink-600/50"
+      // The notch/status bar inset is added as padding rather than baked into
+      // the height, so the bar grows to clear it and the 64px of actual
+      // content keeps its proportions. A fixed h-16 on a device with a notch
+      // puts the page title under the clock.
+      className="sticky top-0 z-20 glass-strong border-b border-ink-600/50"
+      style={{ paddingTop: 'var(--safe-top)' }}
     >
-      <div className="h-full flex items-center gap-3 px-4 sm:px-6 lg:px-8">
+      <div className="h-16 flex items-center gap-3 px-4 sm:px-6 lg:px-8">
         <button
           type="button"
           aria-label="Open menu"

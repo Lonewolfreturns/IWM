@@ -1,0 +1,126 @@
+Microsoft Windows [Version 10.0.26200.9550]
+(c) Microsoft Corporation. All rights reserved.
+
+C:\Users\akash_ax3aplg>ssh -i "C:\Users\akash_ax3aplg\Desktop\Akash\Waste-Management-main\IWMFoodWasteManagement.pem" ec2-user@ec2-18-227-188-57.us-east-2.compute.amazonaws.com
+
+A newer release of "Amazon Linux" is available.
+  Version 2023.12.20260909:
+  Version 2023.12.20260914:
+  Version 2023.12.20260917:
+  Version 2023.12.20260918:
+Run "/usr/bin/dnf check-release-update" for full release and version update info
+   ,     #_
+   ~\_  ####_        Amazon Linux 2023
+  ~~  \_#####\
+  ~~     \###|
+  ~~       \#/ ___   https://aws.amazon.com/linux/amazon-linux-2023
+   ~~       V~' '->
+    ~~~         /
+      ~~._.   _/
+         _/ _/
+       _/m/'
+Last login: Mon Sep 28 12:44:14 2026 from 24.138.53.1
+[ec2-user@ip-172-31-30-38 ~]$ mkdir -p ~/iwm-new
+[ec2-user@ip-172-31-30-38 ~]$ ls -la ~/iwm-new
+total 24
+drwxr-xr-x. 3 ec2-user ec2-user    57 Sep 28 12:49 .
+drwx------. 4 ec2-user ec2-user   110 Sep 28 12:48 ..
+drwx------. 2 ec2-user ec2-user 16384 Sep 28 12:49 assets
+-rw-rw-r--. 1 ec2-user ec2-user   479 Sep 28 12:49 favicon.svg
+-rw-rw-r--. 1 ec2-user ec2-user  1034 Sep 28 12:49 index.html
+[ec2-user@ip-172-31-30-38 ~]$ sudo nginx -T 2>&1 | grep -E "root |server_name"
+        server_name  _;
+        root         /usr/share/nginx/html;
+#        server_name  _;
+#        root         /usr/share/nginx/html;
+    server_name foodloss.ca www.foodloss.ca;
+    root /var/www/iwm;
+    # directory on disk. Without this, loading the app at the root works and
+    server_name foodloss.ca www.foodloss.ca;
+[ec2-user@ip-172-31-30-38 ~]$ ls -lah /var/www/iwm
+total 24K
+drwxr-xr-x. 3 ec2-user ec2-user   57 Sep  9 18:01 .
+drwxr-xr-x. 3 root     root       17 Sep  9 17:57 ..
+drwxr-xr-x. 2 ec2-user ec2-user  16K Sep  9 19:03 assets
+-rw-rw-r--. 1 ec2-user ec2-user  479 Sep  9 19:03 favicon.svg
+-rw-rw-r--. 1 ec2-user ec2-user 1.1K Sep  9 19:03 index.html
+[ec2-user@ip-172-31-30-38 ~]$ ls -la ~/iwm-new
+total 24
+drwxr-xr-x. 3 ec2-user ec2-user    57 Sep 28 12:49 .
+drwx------. 4 ec2-user ec2-user   110 Sep 28 12:48 ..
+drwx------. 2 ec2-user ec2-user 16384 Sep 28 12:49 assets
+-rw-rw-r--. 1 ec2-user ec2-user   479 Sep 28 12:49 favicon.svg
+-rw-rw-r--. 1 ec2-user ec2-user  1034 Sep 28 12:49 index.html
+[ec2-user@ip-172-31-30-38 ~]$ sudo cp -a /var/www/iwm /var/www/iwm-backup-$(date +%Y%m%d-%H%M%S)
+[ec2-user@ip-172-31-30-38 ~]$ ls -ld /var/www/iwm-backup-*
+drwxr-xr-x. 3 ec2-user ec2-user 57 Sep  9 18:01 /var/www/iwm-backup-20260928-125139
+[ec2-user@ip-172-31-30-38 ~]$ sudo rm -rf /var/www/iwm/*
+[ec2-user@ip-172-31-30-38 ~]$ sudo cp -a ~/iwm-new/. /var/www/iwm/
+[ec2-user@ip-172-31-30-38 ~]$ sudo chown -R nginx:nginx /var/www/iwm
+sudo find /var/www/iwm -type d -exec chmod 755 {} \;
+sudo find /var/www/iwm -type f -exec chmod 644 {} \;
+[ec2-user@ip-172-31-30-38 ~]$ ls -lah /var/www/iwm
+total 24K
+drwxr-xr-x. 3 nginx nginx   57 Sep 28 12:49 .
+drwxr-xr-x. 4 root  root    51 Sep 28 12:51 ..
+drwxr-xr-x. 2 nginx nginx  16K Sep 28 12:49 assets
+-rw-r--r--. 1 nginx nginx  479 Sep 28 12:49 favicon.svg
+-rw-r--r--. 1 nginx nginx 1.1K Sep 28 12:49 index.html
+[ec2-user@ip-172-31-30-38 ~]$ sudo nginx -t
+nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
+nginx: configuration file /etc/nginx/nginx.conf test is successful
+[ec2-user@ip-172-31-30-38 ~]$ sudo systemctl reload nginx
+
+
+
+
+To upload files
+
+PS C:\Users\akash_ax3aplg> scp -i "C:\Users\akash_ax3aplg\Desktop\Akash\Waste-Management-main\IWMFoodWasteManagement.pem" -r "C:\Users\akash_ax3aplg\Desktop\Akash\Waste-Management-main\frontend\build\*" ec2-user@ec2-18-227-188-57.us-east-2.compute.amazonaws.com:/home/ec2-user/iwm-new/
+activity-DDt4UpNt.js                                                                  100%  223     4.5KB/s   00:00
+Analytics-DyscKqh7.js                                                                 100%  125KB 586.8KB/s   00:00
+arrow-left-Bjj2LxMY.js                                                                100%  154     3.2KB/s   00:00
+Badge-Iv4CcUkt.js                                                                     100%  745    15.5KB/s   00:00
+building-2-BX6BhY7G.js                                                                100%  428     8.9KB/s   00:00
+carrot-BJJF5epK.js                                                                    100%  672    13.7KB/s   00:00
+ChartCard-iGLm-eMq.js                                                                 100%  809    16.1KB/s   00:00
+circle-check-BcAjuLm_.js                                                              100%  167     3.5KB/s   00:00
+clock-3-CRHzjFyB.js                                                                   100%  176     3.7KB/s   00:00
+cookie-CJmM1oOL.js                                                                    100%  348     7.1KB/s   00:00
+Dashboard-BJHS4FnI.js                                                                 100%   20KB 384.1KB/s   00:00
+DataConfiguration-BWWOQDaR.js                                                         100%   17KB 311.2KB/s   00:00
+DataTable-BgE33z-3.js                                                                 100% 4232    81.0KB/s   00:00
+dataWindow-ZGKctcCy.js                                                                100% 3006    54.4KB/s   00:00
+DatePicker-AGpeHKYr.js                                                                100%   52KB 485.4KB/s   00:00
+download-Dh22IyTQ.js                                                                  100%  251     5.1KB/s   00:00
+EmptyState-CrLyRoBq.js                                                                100%  269KB   1.7MB/s   00:00
+eye-kVS3TCl5.js                                                                       100%  622    11.9KB/s   00:00
+html2canvas-B7WFt52A.js                                                               100%  195KB   1.7MB/s   00:00
+index-BoA-CmDp.js                                                                     100%  427KB   2.6MB/s   00:00
+index-CnzAM8J4.css                                                                    100%   77KB 721.0KB/s   00:00
+index.es-CPNOVxpP.js                                                                  100%  148KB   1.3MB/s   00:00
+Landing-pQy2hYEu.js                                                                   100%   23KB 465.3KB/s   00:00
+Login-DpDy3ich.js                                                                     100% 6797   127.7KB/s   00:00
+map-pin-BcgFX7nl.js                                                                   100%  248     5.2KB/s   00:00
+Modal-UjAR5snd.js                                                                     100% 1928    38.4KB/s   00:00
+octagon-alert-DtqQvqXK.js                                                             100%  418     8.2KB/s   00:00
+plus-Df7X8fCH.js                                                                      100%  142     2.9KB/s   00:00
+purify.es-Dt2VzQ8a.js                                                                 100%   24KB 460.0KB/s   00:00
+Reports-D83CGKtu.js                                                                   100%  463KB   3.7MB/s   00:00
+salad-CS23R9nW.js                                                                     100% 1268    25.3KB/s   00:00
+ScaleManagement-DwzaOHAF.js                                                           100%   26KB 511.8KB/s   00:00
+scales-BvM6CDCx.js                                                                    100%  367     7.2KB/s   00:00
+scaleStatus-CX0BR7Sq.js                                                               100% 1845    34.7KB/s   00:00
+Settings-B8hPb2MM.js                                                                  100%   24KB 423.0KB/s   00:00
+shield-check-Dd6ovGEG.js                                                              100%  439     8.9KB/s   00:00
+SignUp-CbPP7VGa.js                                                                    100%   10KB 207.7KB/s   00:00
+StatCard-wXoByAJb.js                                                                  100% 3258    66.3KB/s   00:00
+SystemLogs-B72_5TxY.js                                                                100% 9653   184.8KB/s   00:00
+trash-2-DR-tb1_a.js                                                                   100%  347     7.2KB/s   00:00
+triangle-alert-COuTy19_.js                                                            100%  254     5.2KB/s   00:00
+typeof-B5XbjTb1.js                                                                    100%  271     5.1KB/s   00:00
+UserManagement-26hOHNK6.js                                                            100%   10KB 208.9KB/s   00:00
+users-DWS4FppJ.js                                                                     100%  498    10.1KB/s   00:00
+favicon.svg                                                                           100%  479     9.8KB/s   00:00
+index.html                                                                            100% 1034    20.6KB/s   00:00
+PS C:\Users\akash_ax3aplg>

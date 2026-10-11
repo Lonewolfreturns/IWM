@@ -1,4 +1,6 @@
 import axios from 'axios';
+import { getToken, clearSession } from '../native/session.js';
+import { clearDashboardCache } from '../lib/dashboardCache.js';
 
 // Three AWS Lambda Function URLs, three clients:
 //
@@ -46,7 +48,10 @@ function createClient(baseURL) {
   });
 
   client.interceptors.request.use((config) => {
-    const token = localStorage.getItem('ww_token');
+    // Read from the session module rather than localStorage directly: in the
+    // native apps the token lives in the Keychain / Android Keystore, which
+    // has no synchronous API. See native/session.js for why there is a cache.
+    const token = getToken();
     if (token) config.headers.Authorization = `Bearer ${token}`;
     return config;
   });
@@ -65,11 +70,32 @@ const api = createClient(CORE_BASE_URL);
 // and redirecting there would wipe the form instead of showing the error toast.
 const AUTH_PATHS = ['/login', '/signup'];
 
-const handleUnauthorized = (err) => {
+/*
+ * How the app leaves for the sign-in screen.
+ *
+ * `window.location.href` is wrong in the native apps. There the bundle is
+ * served by Capacitor's own local server, so assigning location tears down the
+ * WebView and reloads the entire app: a visible flash of empty shell, every
+ * in-memory cache dropped, and a second session hydrate before anything
+ * renders. The router performs the same navigation without any of that, so App
+ * registers its navigate function here at mount. The hard redirect is kept as
+ * a fallback for a 401 that somehow lands before that registration.
+ */
+let navigateToLogin = null;
+export function setUnauthorizedHandler(fn) {
+  navigateToLogin = fn;
+}
+
+const handleUnauthorized = async (err) => {
   if (err?.response?.status === 401 && !AUTH_PATHS.includes(window.location.pathname)) {
-    localStorage.removeItem('ww_token');
-    localStorage.removeItem('ww_user');
-    window.location.href = '/login';
+    // The two halves of auth.js `logout()`, called directly rather than
+    // through it. auth.js imports this file for its clients, so importing it
+    // back from here is a cycle — whichever module initialised first would see
+    // a half-built copy of the other. Both of these are leaf modules.
+    await clearSession();
+    clearDashboardCache();
+    if (navigateToLogin) navigateToLogin();
+    else window.location.href = '/login';
   }
   return Promise.reject(err);
 };
