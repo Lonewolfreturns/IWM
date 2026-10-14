@@ -418,9 +418,36 @@ def scoped_uids(claims, wanted_uid):
     if is_admin:
         allowed = discover_uids()
     else:
-        allowed = [
+        # Assigned scale IDs come from iwm-scales; the readings are keyed by
+        # whatever the DEVICE sends. Nothing keeps the two spellings in step —
+        # a record saved as "GUELPH04" against telemetry arriving as "Guelph04"
+        # is one scale — and the partition key is case-sensitive, so handing
+        # the stored spelling straight to a query returns nothing at all. No
+        # error, just an empty page.
+        #
+        # resolve_uid was already used for an explicitly requested ?uid=, but
+        # not for the caller's own scope, which is what every unfiltered
+        # request uses. Admins never hit this because discover_uids() reads the
+        # readings table directly, which is why it showed only on the client
+        # side.
+        #
+        # The scan behind discover_uids is cached in module scope
+        # (UID_CACHE_TTL), so this costs one scan per warm container rather
+        # than one per request.
+        assigned = [
             str(s.get("scaleId")) for s in assigned_scales(claims.get("email", "")) if s.get("scaleId")
         ]
+        known = discover_uids()
+        allowed, seen = [], set()
+        for scale_id in assigned:
+            # An assigned scale that has never reported keeps its own spelling
+            # and simply returns nothing: registered but silent, not misspelled.
+            uid = resolve_uid(scale_id, known) or scale_id
+            # Two records differing only by case are one device; querying it
+            # twice would double every row.
+            if uid not in seen:
+                seen.add(uid)
+                allowed.append(uid)
 
     if wanted_uid:
         # Matched case-insensitively, then queried with the stored spelling —

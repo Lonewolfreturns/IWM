@@ -216,6 +216,37 @@ def validate_time_zone(value):
     return None, f"'{tz}' is not a valid IANA time zone (e.g. America/Halifax)"
 
 
+def find_scale_id(wanted: str):
+    """
+    The stored spelling of a scale record, matched case-insensitively.
+
+    Scale records and readings hold the same device UID in two different
+    tables, and nothing keeps their capitalisation in step: this Lambda used to
+    upper-case every id it wrote, while the readings keep whatever the device
+    sent. So a record saved as "GUELPH04" and telemetry arriving as "Guelph04"
+    are one physical scale that every exact-match lookup treated as two.
+
+    Returns the id exactly as stored (partition keys are case-sensitive, so the
+    caller must use that spelling), or None when no record matches.
+    """
+    wanted = (wanted or "").strip()
+    if not wanted:
+        return None
+    try:
+        # Fast path: most ids already match exactly.
+        if _scales.get_item(Key={"scaleId": wanted}).get("Item"):
+            return wanted
+        result = _scales.scan(ProjectionExpression="scaleId")
+        target = wanted.lower()
+        for item in result.get("Items", []):
+            stored = str(item.get("scaleId") or "")
+            if stored.lower() == target:
+                return stored
+    except ClientError as err:
+        print(f"ERROR find_scale_id: {err}")
+    return None
+
+
 def scale_assignees(item: dict) -> list:
     """
     The emails a scale is assigned to, from either storage shape.
@@ -346,10 +377,14 @@ def list_scales(claims, params=None):
     items = [public_scale(s) for s in result.get("Items", [])]
 
     if is_admin:
-        known = {s["scaleId"] for s in items}
+        # Compared case-insensitively. A device provisioned as "GUELPH04"
+        # whose telemetry arrives as "Guelph04" is one scale; an exact-match
+        # check listed it twice — once registered, once as an unprovisioned
+        # device that could never be dismissed.
+        known = {str(s["scaleId"]).strip().lower() for s in items}
         fresh = str((params or {}).get("refresh") or "").strip().lower() in ("1", "true", "yes")
         for uid in discover_reading_uids(force=fresh):
-            if uid not in known:
+            if str(uid).strip().lower() not in known:
                 items.append(unregistered_scale(uid))
 
     items.sort(key=lambda s: (s.get("registered") is not False, s.get("scaleId") or ""))
@@ -448,11 +483,38 @@ def create_scale(claims, body):
 
     # The scale ID must be the physical device UID (e.g. DAL00001) because
     # incoming telemetry is keyed by it. Never auto-generate this.
-    scale_id = (body.get("scaleId") or body.get("id") or "").strip().upper()
+    #
+    # Stored EXACTLY as given. Upper-casing here is what produced duplicate
+    # rows: provisioning the discovered device "Guelph04" wrote a record called
+    # "GUELPH04", which then failed to match the telemetry it was created for,
+    # so the unregistered row never went away and the fleet showed the same
+    # scale twice.
+    scale_id = (body.get("scaleId") or body.get("id") or "").strip()
     if not scale_id:
         return respond(400, {"message": "scaleId (the device UID, e.g. DAL00001) is required"})
-    if not re.match(r"^[A-Z0-9_-]{3,32}$", scale_id):
-        return respond(400, {"message": "scaleId must be 3-32 chars: letters, digits, - or _"})
+    # Mixed case and spaces are both real in this fleet — "Guelph04",
+    # "Community Day", "TEST 1". The old pattern allowed neither, so those
+    # devices could not be provisioned at all.
+    if not re.match(r"^[A-Za-z0-9 _-]{2,64}$", scale_id):
+        return respond(
+            400,
+            {"message": "scaleId must be 2-64 chars: letters, digits, spaces, - or _"},
+        )
+
+    # Reject a case-variant of an existing record rather than creating a second
+    # row for one device — attribute_not_exists is case-sensitive and would
+    # happily allow it.
+    clash = find_scale_id(scale_id)
+    if clash and clash != scale_id:
+        return respond(
+            409,
+            {
+                "message": (
+                    f"{clash} is already registered — that is the same device "
+                    f"as {scale_id}, spelled differently."
+                )
+            },
+        )
 
     name = (body.get("name") or "").strip()
     if not name:
@@ -525,7 +587,9 @@ def create_scale(claims, body):
 
 
 def update_scale(claims, scale_id, body):
-    scale_id = scale_id.strip().upper()
+    # Resolved rather than upper-cased, so a record stored under any casing is
+    # still reachable from a URL that spells it differently.
+    scale_id = find_scale_id(scale_id) or scale_id.strip()
     try:
         existing = _scales.get_item(Key={"scaleId": scale_id}).get("Item")
     except ClientError as err:
@@ -621,12 +685,17 @@ def update_scale(claims, scale_id, body):
 def delete_scale(claims, scale_id):
     if claims["role"] != "admin":
         return respond(403, {"message": "Admin access required"})
+    # Resolved, not upper-cased: a record stored as "Guelph04" is not deleted
+    # by a request for "GUELPH04", and the call would report success having
+    # removed nothing.
+    target = find_scale_id(scale_id) or scale_id.strip()
     try:
-        _scales.delete_item(Key={"scaleId": scale_id.strip().upper()})
+        _scales.delete_item(Key={"scaleId": target})
     except ClientError as err:
         print(f"ERROR delete_scale: {err}")
         return respond(503, {"message": "Could not delete scale"})
-    return respond(200, {"id": scale_id.strip().upper()})
+    # Echo what was actually removed, not a re-cased guess at it.
+    return respond(200, {"id": target})
 
 
 # ==========================================================================

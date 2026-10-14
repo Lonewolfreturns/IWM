@@ -21,20 +21,28 @@ Zero external dependencies — stdlib + boto3 (preinstalled in Lambda).
 TABLE SHAPE (written by the existing ingest Lambda)
 --------------------------------------------------------------------------
     UID                 partition key, e.g. "DAL00001"
-    DateTime            sort key — UTC, e.g. "2025-06-12T17:22:00"
-    Date                LOCAL date, "2025-06-12"
-    Time                LOCAL time, "14:22:00"
+    DateTime            sort key — the DEVICE's naive wall clock,
+                        e.g. "2025-06-12T17:22:00"  (no zone, not UTC)
+    Date                same clock, date part, "2025-06-12"
+    Time                same clock, time part, "14:22:00"
     PerDepositWeight    Decimal
     RunningTotalWeight  Decimal
     Message1            device event, e.g. "Bin Dumped"
     Message2            waste category, e.g. "Overproduction"
     Message3            free text, lower-cased on ingest
 
-The split is deliberate (see the ingest Lambda): the sort key is UTC so it can
-be compared against server time, while Date/Time stay local so "today's total"
-and "peak hours" reflect the kitchen's own day rather than drifting across
-midnight UTC. This module honours that — windowing uses DateTime, all
-daily/hourly aggregation uses Date and Time.
+All three come off the same clock. The deployed ingest Lambda stores the
+device's stamp verbatim, with no zone attached and no conversion — so none of
+these is UTC, and comparing any of them against server time is wrong unless
+server time is first put on the fleet's clock (see fleet_now and
+FLEET_TIME_ZONE).
+
+An earlier version of this note claimed DateTime was UTC. It never was. That
+belief is what made the live panel read "Idle" no matter how recently a scale
+had reported, because the ±60s band was built from a UTC "now" and compared
+against a device-local stamp four hours away from it.
+
+Windowing uses DateTime; daily and hourly aggregation uses Date and Time.
 
 --------------------------------------------------------------------------
 WHY THIS IS TIME-WINDOWED
@@ -616,14 +624,16 @@ def fetch_live(claims, params):
     band would be off by the difference. That matters only for a device
     provisioned outside the fleet's zone, and the fallback covers it.
     """
-    is_admin = claims["role"] == "admin"
     try:
         seconds = min(3600, max(5, int(params.get("seconds") or LIVE_WINDOW_SECONDS)))
     except ValueError:
         seconds = LIVE_WINDOW_SECONDS
 
     try:
-        scoped = discover_uids() if is_admin else assigned_uids(claims.get("email", ""))
+        # Readings-table spelling for both roles — see scoped_uids. Without it
+        # the live panel was permanently empty for clients whose scale record
+        # is cased differently from its telemetry.
+        scoped = scoped_uids(claims)
         if not scoped:
             return [], None
 
@@ -675,6 +685,66 @@ def resolve_uid(wanted: str, allowed):
     return None
 
 
+def scoped_uids(claims):
+    """
+    Every UID this caller may read, spelled the way the READINGS table spells it.
+
+    THE BUG THIS EXISTS TO FIX
+    --------------------------
+    Admins and clients were getting their UID lists from two different tables,
+    and nothing kept the two spellings in step:
+
+        admin   -> discover_uids()  -> UID as written by the device  "Guelph04"
+        client  -> assigned_uids()  -> scaleId from iwm-scales       "GUELPH04"
+
+    Both lists then went straight into query_window(), which is a DynamoDB
+    partition-key query — and partition keys are case-sensitive. So the admin
+    asked for "Guelph04" and got a week of data, while the client asked for
+    "GUELPH04" and got nothing at all. The scale appeared in their list, because
+    that comes from the scales table, and then sat there reading "offline" with
+    zero readings behind it.
+
+    The two tables disagree because they are written by different things: the
+    readings carry whatever the device was provisioned with, while the scale
+    record carries whatever was typed into Scale Management — and an older
+    version of the api Lambda upper-cased every id it stored.
+
+    resolve_uid already existed to handle exactly this, but it was only ever
+    applied to an explicitly requested ?uid=, to purges and to counts. The
+    caller's own scope list — the thing every single dashboard request depends
+    on — was never put through it.
+
+    Resolving here rather than at each call site means every route is fixed at
+    once, and a scale whose record is spelled differently from its telemetry
+    simply works.
+
+    An assigned scale that has never reported keeps its own spelling and
+    returns nothing, which is correct: it is registered but silent, not
+    mis-spelled.
+    """
+    if (claims.get("role") or "").strip().lower() == "admin":
+        return discover_uids()
+
+    assigned = assigned_uids(claims.get("email", ""))
+    if not assigned:
+        return []
+
+    # The projected scan behind this is cached in module scope (UID_CACHE_TTL),
+    # so adding it to the client path costs one scan per warm container per
+    # five minutes rather than one per request.
+    known = discover_uids()
+
+    out, seen = [], set()
+    for scale_id in assigned:
+        uid = resolve_uid(scale_id, known) or str(scale_id)
+        # Two scale records differing only by case resolve to the same
+        # telemetry UID; querying it twice would duplicate every reading.
+        if uid not in seen:
+            seen.add(uid)
+            out.append(uid)
+    return out
+
+
 def fetch_readings(claims, params):
     """
     Returns (readings, error_response).
@@ -683,14 +753,11 @@ def fetch_readings(claims, params):
     recent readings — a dashboard showing the last known data is far more
     useful than one showing an empty state because ingestion paused.
     """
-    is_admin = claims["role"] == "admin"
     wanted_uid = (params.get("uid") or "").strip()
 
     try:
-        if is_admin:
-            scoped = discover_uids()
-        else:
-            scoped = assigned_uids(claims.get("email", ""))
+        # Readings-table spelling for both roles — see scoped_uids.
+        scoped = scoped_uids(claims)
 
         if wanted_uid:
             match = resolve_uid(wanted_uid, scoped)
